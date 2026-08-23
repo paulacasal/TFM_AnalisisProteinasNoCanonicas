@@ -1,0 +1,77 @@
+# figura 1D: number según orf subtype
+
+# importación paleta colores, librería y datos
+source("Yo/Figuras/library.R")
+source("Yo/Figuras/mipaleta_orfs.R")
+source("Yo/Figuras/Setup_figuras.R")
+
+
+plot_orf_counts <- function(datos, nombre_db) {
+  
+  datos_finales <- datos |> 
+      full_join(uniprot_cds, by = c("gene_name", "cdna", "amino_acid_sequence")) |> 
+      mutate(orf_class = if_else(!is.na(uniprot_id), "CDS", orf_class)) 
+  
+  datos_excluir <- c("CDS", "multiclass", "wrapping", "miscellaneous", "unknown ORF", 
+                     "ncRNA", "protein_coding_CDS_not_defined")
+  
+  col_noCDS <- datos_finales |> 
+      filter(!orf_class %in% datos_excluir,
+             !is.na(orf_class)) |> 
+      summarise(n = n(), .groups = "drop") |> 
+      mutate(orf_class = "no CDS")
+  
+  resto_col <- datos_finales |> 
+      filter(orf_class %in% niveles_permitidos) |> 
+      mutate(orf_class = case_when(
+        orf_class == "lncRNA-ORF" ~ "lncORF",
+        orf_class == "ncRNA_from_protein_coding_gene" ~ "ncORF",
+        TRUE ~ as.character(orf_class))) |> 
+    group_by(orf_class) |> 
+    summarise(n = n(), .groups = "drop")
+  
+  datos_plot <- bind_rows(col_noCDS, resto_col)
+  
+  p1 <- datos_plot |> 
+    group_by(orf_class) |> 
+    mutate(orf_class = factor(orf_class, levels = orden_orf)) 
+  
+  plot1_D <- ggplot(p1, aes(x = orf_class, y = n, fill = orf_class)) +
+    geom_col(position = "dodge", width = 0.5, color="black", linewidth=0.6) +
+    geom_text(aes(label = n), 
+              position = position_dodge(width = 0.5),
+              vjust = -0.3,       
+              size = 5.5)+
+    scale_x_discrete(drop = TRUE) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1)), trans = "log10") +
+    scale_fill_manual(values = colores_orfs) +
+    labs(subtitle = nombre_db, x = "ORF subtype", y = "Number") +
+    theme_minimal(base_size = 15) +
+    theme(axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 1),
+          axis.title.x = element_text(hjust = 0.5),
+          panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.8),
+          legend.position = "right",
+          plot.margin = margin(t = 6, r = 13, b = 9, l = 6, unit = "pt"))
+  
+  print(plot1_D)
+  
+  ## guardo tabla de datos
+  # Ruta 
+  ruta_guardado <- "C:/Users/paula/UNAV/TFM/Yo/Figuras/estadisticos"
+  
+  tabla_datos_figura_1D <- paste0("tabla_datos_figura_1D_", nombre_db, "_", Sys.Date(), ".xlsx")
+  ruta_completa <- file.path(ruta_guardado, tabla_datos_figura_1D)
+  
+  wb <- createWorkbook()
+  
+  addWorksheet(wb, "n_orfclass")
+  writeData(wb, "n_orfclass", p1)
+  
+  # Guardar
+  saveWorkbook(wb, ruta_completa, overwrite = TRUE)
+  
+  }
+
+grafico_ieatlas <- plot_orf_counts(ieatlas, "ieatlas")
+grafico_two_evidences <- plot_orf_counts(ieatlas_two_evidences, "ieatlas_two_evidences")
+
