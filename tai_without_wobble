@@ -1,0 +1,397 @@
+# trna adaptation index sin wobble
+# he descargado los trnas de humano de Gtrnadb
+# he descargado los trna de virus de trnadb. (reliable)
+
+# Cojo los tRNAs de las células sanas y calculo la abundancia de cada anticodón 
+# En este script no se tienen en cuenta las reglas de balanceo (wobble) 
+# Esto da un valor de "disponibilidad de tRNA" para cada uno de los 60 codones.
+# Finalmente normalizo para cada aa, busco qué codón tuvo el valor más alto. A ese 
+# le pongo un 1. A los demás codones de ese mismo aminoácido, los divido por ese máximo 
+# (me quedarán valores entre 0 y 1). Todo esto me generará una tabla de referencia 
+
+# SET UP TRNA INDEX
+# importación paleta colores y librería
+source("Yo/Figuras/library.R")
+source("Yo/Figuras/mipaleta_orfs.R")
+source("Yo/Figuras/Setup_figuras.R")
+
+df_trnas <- function(datos, nombre_db) {
+  
+  mis_datos <- datos |> 
+    full_join(uniprot_cds, by = c("gene_name", "cdna", "amino_acid_sequence")) |> 
+    mutate(orf_class = if_else(!is.na(uniprot_id), "CDS", orf_class)) 
+  
+  datos_excluir <- c("CDS", "multiclass", "wrapping", "miscellaneous", "unknown ORF", 
+                     "ncRNA", "protein_coding_CDS_not_defined")
+  
+  col_noCDS <- mis_datos |> 
+    filter(!orf_class %in% datos_excluir,
+           !is.na(orf_class)) |>  
+    mutate(orf_class = "no CDS")
+  
+  resto_col <- mis_datos |> 
+    filter(orf_class %in% niveles_permitidos) |> 
+    mutate(orf_class = case_when(
+      orf_class == "lncRNA-ORF" ~ "lncORF",
+      orf_class == "ncRNA_from_protein_coding_gene" ~ "ncORF",
+      TRUE ~ as.character(orf_class))) 
+  
+  datos_finales <- bind_rows(col_noCDS, resto_col) 
+  
+  # preparo la matriz de mis genes: cada fila un gen y cada columna uno de los 
+  # 60 codones (en tAI no se usan los stop codons ni met). Frec de cuanto aparece cada uno
+  # lista codones, pero solo con los que tienen correspondencia perfecta a la lista de 
+  # trna humanos
+  codones_48 <- c("AAA", "AAC", "AAG", "ACA", "ACG", "ACT", "AGA", "AGC", "AGG", 
+                  "ATA", "ATC", "ATG", "ATT", "CAA", "CAC", "CAG", "CCA", "CCG", 
+                  "CCT", "CGA", "CGG", "CGT", "CTA", "CTG", "CTT", "GAA", "GAC",
+                  "GAG", "GCA", "GCG", "GCT", "GGA", "GGC", "GGG", "GTA", "GTG", 
+                  "GTT", "TAC", "TAT", "TCA", "TCG", "TCT", "TGA", "TGC", "TGG",
+                   "TTA", "TTC", "TTG")
+  
+  codon_aa_orf <- datos_finales |> 
+    mutate(codones_seq = if_else(orf_class == "CDS", cdna, orf_seq)) |> 
+    mutate(codones = str_extract_all(codones_seq, ".{3}")) |> 
+    unnest(codones) |> 
+    # filtrado de seguridad para cuando no son múltiplos de 3 y nas
+    filter(nchar(codones) == 3 & !is.na(codones)) |> 
+    # saco también los aa de cada gen para así hacer la comparación de preferencia de uso para el mismo gen
+    # para cada aa veo el codon que tiene el anticodon más abundante
+    group_by(gene_name, orf_class) |>
+    # strsplit(amino_acid_sequence, split = "") |> 
+    mutate(aa_pos = row_number()) |>                          # posición del codón
+    mutate(aa = str_sub(amino_acid_sequence, aa_pos, aa_pos)) |> 
+    ungroup() |>
+    filter(!is.na(aa)) |>
+    select(gene_name, orf_class, codones, aa)
+  
+  # uso este df para ver el porcentaje de los 13 codones que no encajan que hay en mis datos
+  codones_60 <- c("TTT","TTC","TTA","TTG", "TCT","TCC","TCA","TCG", "TAT","TAC","TGT","TGC","TGG",
+                  "CTT","CTC","CTA","CTG", "CCT","CCC","CCA","CCG", "CAT","CAC","CAA","CAG", "CGT","CGC","CGA","CGG",
+                  "ATT","ATC","ATA","ACT","ACC","ACA","ACG", "AAT","AAC","AAA","AAG", "AGT","AGC","AGA","AGG",
+                  "GTT","GTC","GTA","GTG", "GCT","GCC","GCA","GCG", "GAT","GAC","GAA","GAG", "GGT","GGC","GGA","GGG")
+  
+  # ahora voy a mirarlo por gen, porque si tiene un porcentaje muy alto no es muy útil hacer tai en ellos
+  # se decide 30% como el valor límite
+  faltantes <- setdiff(codones_60, codones_48)
+  
+  porcentaje_14_gen <- codon_aa_orf |> 
+    group_by(orf_class, gene_name) |> 
+    summarise(
+      total_codones = n(),
+      num_faltantes = sum(codones %in% faltantes),
+      porcentaje = mean(codones %in% faltantes) * 100
+      ) |> 
+    filter(porcentaje >= 30)
+  
+  # limpio codon_aa_orf
+  codon_aa_orf <- codon_aa_orf |>
+    # busca la misma combinacion orfclass <-> gen y la quita
+    # util porque auqnue lo tengo por codones tengo orfclass y genname
+    anti_join(porcentaje_14_gen, by = c("orf_class", "gene_name"))
+  
+  # esto es para ver cuantos tengo
+  matriz_codones <- codon_aa_orf |>
+    # solo quiero usar los codones permitidos
+    filter(codones %in% codones_48) |>
+    # paso a factor porque sino me da error pivot wider
+    mutate(codones = factor(codones, levels = codones_48)) |>
+    group_by(gene_name, orf_class, codones) |>
+    summarise(n = n(), .groups = "drop") |>
+    pivot_wider(names_from = codones, values_from = n, values_fill = 0)
+  
+  # importo los datos de trna humano
+  datos_humano <- readRNAStringSet("Yo/DATA/hg38_mature_tRNAs.fa")
+  
+  # tengo que obtener cuantas veces aparece cada anticodon
+  # hay 48 anticodones sin wobble en el genoma nuclear humano de células sanas
+  trna_hum <- data.frame(
+    header = names(datos_humano),
+    sequence = as.character(datos_humano)) |> 
+    mutate(
+      # Extraer el anticodón usando expresión para coger lo que está entre el segundo y el tercer guión
+      anticodones_hum = str_extract(header, "(?<=\\()[A-Z]{3}(?=\\))"),
+      # los paso a codones. Trato los anticodones como dna porque todos van con T
+      codon_hum = as.character(reverseComplement(DNAStringSet(anticodones_hum)))) |> 
+    # cuento cuantas veces está cada codon para así tener la abundancia de que codones
+    # se traducen a anticodones y poder calcular cual es el más eficiente
+    count(codon_hum, name = "W_i") |>
+    # Traducimos el codón para saber con que aa va
+    mutate(aa_hum = as.character(translate(DNAStringSet(codon_hum)))) |>
+    filter(aa_hum != "*") |>
+    group_by(aa_hum) |>
+    # divido por el máximo para tener todos entre un valor de 0 y 1 que será su eficiencia
+    # y será la eficiencia dentro del aa: 1 = gen usa codones de tRNAs abundantes: traducción rápida y eficiente.
+    mutate(w_i = W_i / max(W_i)) |> 
+    ungroup() |>
+    select(codon_hum, aa_hum, w_i)
+  
+  trnaai_hum <- codon_aa_orf |>
+    # hago inner join para unir solo los que están en trnahum, 
+    inner_join(trna_hum, by = c("codones" = "codon_hum")) |>
+    # penalizo la falta de apareamiento para que la eficiencia de traducción 
+    # se asemeje más a la realidad y no sea todos perfectos match
+    # le daré el valor del más bajo
+    group_by(gene_name, orf_class) |>
+    summarise(
+      n_codones = n(),
+      tai_hum = exp(mean(log(w_i))), # mejor que sum/n
+      .groups = "drop") |> 
+    # si la media era 40aa por miP, filtramos y así es más robusto
+    filter(n_codones >= 40)
+  
+  
+  ## ahora virus
+  datos_virus <- read_tsv("Yo/DATA/trna_sequence_virus_reliable.tab/trna_sequence_virus_1.tab")
+  
+  # por si alguna venía en minúscula
+  anticodones_virus <- toupper(as.character(datos_virus[[8]])) 
+  
+  # tengo que meter vector anticodon en df para poder usar mutate
+  trna_virus <- data.frame(anticodon = anticodones_virus) |> 
+    # filtro de seguridad
+    filter(nchar(anticodon) == 3) |>
+    mutate(codon_vir = as.character(reverseComplement(DNAStringSet(anticodon)))) |>
+    count(codon_vir, name = "W_i") |>
+    mutate(aa_vir = as.character(translate(DNAStringSet(codon_vir)))) |>
+    group_by(aa_vir) |>
+    mutate(w_i = W_i / max(W_i, na.rm = TRUE)) |>
+    ungroup() |>
+    select(codon_vir, aa_vir, w_i)
+  
+  trnaai_vir <- codon_aa_orf |>
+    inner_join(trna_virus, by = c("codones" = "codon_vir")) |>
+    group_by(gene_name, orf_class) |>
+    summarise(
+      n_codones = n(),
+      tai_vir = exp(mean(log(w_i))),
+      .groups = "drop" ) |> 
+    filter(n_codones >= 40)
+  
+  # aplico tai a humano y virus
+  datos_plot <- trnaai_hum |> 
+    full_join(trnaai_vir, by = c("gene_name", "orf_class")) |> 
+    # filter(n_codones >20) |> 
+    pivot_longer(
+      cols = c(tai_hum, tai_vir),
+      names_to = "origen_trna",
+      values_to = "valor_tai") |> 
+    mutate(origen_trna = if_else(origen_trna == "tai_hum", "Human", "Virus")) |> 
+    mutate(orf_class = factor(orf_class, levels = orden_orf)) 
+
+  # plot 8A
+  p2 <- ggplot(datos_plot, aes(x = orf_class, y = valor_tai, fill = orf_class)) +
+    geom_violin(alpha = 0.7, scale = "width") +
+    geom_boxplot(width = 0.15, outlier.shape = NA, alpha = 0.8, show.legend = FALSE) +
+    facet_wrap(~ origen_trna, scales = "free_x") +
+    scale_fill_manual(values = colores_orfs) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.1)) +
+    labs(
+      title = "tRNA Adaptation Index without wobble",
+      subtitle = nombre_db,
+      x = "ORF Class",
+      y = "translation efficency"
+    ) +
+    theme_minimal(base_size = 15) +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      axis.text.x = element_blank(),
+      legend.position = "right"
+    )
+  
+  print(p2)
+  
+  # se observa una eficiencia de traducción de cds consistente entorno a 0.7,
+  # que se ve corroborado por la literatura descrita
+  # mientras que la de no cds varía mucho y baja la mediana a 0.4, y hay colas
+  # que se extienden hasta casi el 0, es decir, hay genes nada eficientes en ncaORFs.
+  # el tai viríco es menor en todos los casos y en cds es mayor puesto que al final
+  # la maquinaria del virus se adapta a la más óptima del huésped que es la de cds
+  # también es posible que los virus dependan mucho del wobble y que no se ha aplicado
+  
+  
+  # ESTADÍSTICOS
+  # Nivel global: human vs virus, con todos los orfs juntos
+  # los datos biológicos no suelen seguir distribución normal y son muestras emparejadas
+  # aplico wilcox que es mannwhitneyU y t.test
+  wilcox_global <- datos_plot |> 
+    # especifico rstatix porque sino ns por qué no lo coge
+    rstatix::wilcox_test(valor_tai ~ origen_trna, paired = TRUE) |> 
+    add_significance()
+  
+  # print(wilcox_global) # hay diferencias significativas
+  
+  # Nivel por clase: human vs virus según orfclass
+  wilcox_clase <- datos_plot |> 
+    group_by(orf_class) |> 
+    rstatix::wilcox_test(valor_tai ~ origen_trna, paired = TRUE) |> 
+    adjust_pvalue(method = "bonferroni") |> 
+    add_significance()
+  
+  #print(wilcox_clase)
+  
+  # miré los propios subtipos para ver si hay diferencias entre ellos
+  # uso Kruskal-Wallis que es el equivalente no paramétrico del ANOVA
+  
+  # como las hubo miro comparacion por pares
+  bonferroni_subtypes <- datos_plot |> 
+    group_by(origen_trna) |> 
+    pairwise_wilcox_test(
+      valor_tai ~ orf_class, 
+      p.adjust.method = "bonferroni") 
+  
+  
+  # ver cual es el efecto porque tengo un tamaño diferente de los datos: cds mucho más grandes
+  bonferroni_subtypes_efecto <- datos_plot |> 
+    group_by(origen_trna) |> 
+    wilcox_effsize(valor_tai ~ orf_class, p.adjust.method = "bonferroni")
+  
+  # Ruta 
+  ruta_guardado <- "C:/Users/paula/UNAV/TFM/Yo/Figuras/estadisticos"
+  
+  estadisticos_trnai_sinwobble <- paste0("Resultados_tAI_", nombre_db, "_", Sys.Date(), ".xlsx")
+  ruta_completa <- file.path(ruta_guardado, estadisticos_trnai_sinwobble)
+  
+  wb <- createWorkbook()
+  
+  addWorksheet(wb, "Wilcox_Global")
+  writeData(wb, "Wilcox_Global", wilcox_global)
+  
+  addWorksheet(wb, "Wilcox_Clase")
+  writeData(wb, "Wilcox_Clase", wilcox_clase)
+  
+  addWorksheet(wb, "Bonferroni_subtypes")
+  writeData(wb, "Bonferroni_subtypes", bonferroni_subtypes)
+  
+  addWorksheet(wb, "Bonferroni_subtypes_efecto")
+  writeData(wb, "Bonferroni_subtypes_efecto", bonferroni_subtypes_efecto)
+  
+  addWorksheet(wb, "porcentaje_14_gen")
+  writeData(wb, "porcentaje_14_gen", porcentaje_14_gen)
+  
+  # añado un ejeplo de gen que está en vcds y nocds para ver que peso le da 
+  # a cada codon
+  abhd18_ejemplo <- codon_aa_orf |>
+    filter(gene_name == "ABHD18") |>
+    inner_join(trna_hum, by = c("codones" = "codon_hum")) |>
+    select(gene_name, orf_class, codones, w_i)
+
+  addWorksheet(wb, "abhd18_ejemplo")
+  writeData(wb, "abhd18_ejemplo", abhd18_ejemplo)
+  
+  # incluyo además el valor de la mediana
+  tabla_medianas <- datos_plot |>
+    group_by(orf_class, origen_trna) |>
+    summarise(
+      mediana_tai = median(valor_tai, na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    pivot_wider(
+      names_from = origen_trna,
+      values_from = mediana_tai
+    )
+  
+  addWorksheet(wb, "tabla_medianas")
+  writeData(wb, "tabla_medianas", tabla_medianas)
+  
+  # Guardar
+  saveWorkbook(wb, ruta_completa, overwrite = TRUE)
+  
+  # ahora vamos a generar la lista de candidatos que superan 0.85
+  
+  genes_efi <- datos_plot |> 
+    filter(origen_trna == "Human", valor_tai >= 0.85)
+  
+  # print(genes_efi)
+  
+  # ruta
+  genes_trnai_sinwobble <- paste0("Genes_efi_tAI_", nombre_db, "_", Sys.Date(), ".xlsx")
+  ruta_completa2 <- file.path(ruta_guardado, estadisticos_trnai_sinwobble)
+  
+  #addWorksheet(wb, "Genes_efi_tai")
+  #writeData(wb, "Genes_efi_tai", genes_efi)
+  
+  saveWorkbook(wb, ruta_completa, overwrite = TRUE)
+  
+  
+  ## ANEXO
+  borde_vertical <- fp_border(color = "black", width = 0.5)
+  
+  ft_wilcox_clase <- wilcox_clase |>
+    select(any_of(c("orf_class", "group1", "group2", "n1", "n2", "statistic", "p", "p.adj", "p.adj.signif"))) |>
+    dplyr::rename(
+      `Clase de ORF` = orf_class,
+      `Grupo 1` = group1,
+      `Grupo 2` = group2,
+      `Estadístico (V)` = statistic,
+      `Valor p` = p,
+      `Valor p (Bonf.)` = p.adj,
+      `Significancia` = p.adj.signif
+    ) |>
+    flextable() |>
+    set_caption(caption = "Prueba de rangos con signo de Wilcoxon para muestras emparejadas (tAI humano vs. viral) por clase de ORF.") |>
+    colformat_double(j = c("Valor p", "Valor p (Bonf.)"), digits = 4) |>
+    theme_vanilla() |>
+    font(fontname = "Times New Roman", part = "all") |>
+    fontsize(size = 9, part = "all") |>
+    border_inner_v(border = borde_vertical) |>
+    border_outer(border = borde_vertical) |>
+    autofit()
+  
+  
+  ft_efecto <- bonferroni_subtypes_efecto |>
+    select(any_of(c("origen_trna", "group1", "group2", "effsize", "magnitude"))) |>
+    dplyr::rename(
+      `Origen ARNt` = origen_trna,
+      `Subtipo 1` = group1,
+      `Subtipo 2` = group2,
+      `Tamaño del efecto (r)` = effsize,
+      `Magnitud` = magnitude
+    ) |>
+    flextable() |>
+    set_caption(caption = "Magnitud del tamaño del efecto (wilcox_effsize) en las comparaciones por pares entre subtipos de ORF.") |>
+    colformat_double(j = "Tamaño del efecto (r)", digits = 4) |>
+    theme_vanilla() |>
+    font(fontname = "Times New Roman", part = "all") |>
+    fontsize(size = 9, part = "all") |>
+    border_inner_v(border = borde_vertical) |>
+    border_outer(border = borde_vertical) |>
+    autofit()
+  
+  
+  ft_medianas <- tabla_medianas |>
+    dplyr::rename(`Clase de ORF` = orf_class) |>
+    flextable() |>
+    set_caption(caption = "Medianas del índice tAI por clase de ORF según el origen del repertorio de ARNt.") |>
+    colformat_double(digits = 4) |>
+    theme_vanilla() |>
+    font(fontname = "Times New Roman", part = "all") |>
+    fontsize(size = 9, part = "all") |>
+    border_inner_v(border = borde_vertical) |>
+    border_outer(border = borde_vertical) |>
+    autofit()
+  
+  
+  doc <- read_docx() |>
+    body_add_par("Anexo: Análisis Estadístico del tRNA Adaptation Index (tAI)", style = "heading 1") |>
+    body_add_par("Evaluación cuantitativa de la eficiencia de traducción teórica (tAI) entre los distintos subtipos de ORFs no canónicos y las secuencias codificantes (CDS). Se presentan los contrastes no paramétricos de Wilcoxon para muestras emparejadas (repertorio humano vs. viral), la corrección por comparaciones múltiples de Bonferroni, la estimación del tamaño del efecto y las medianas descriptivas por categoría.", style = "Normal") |>
+    body_add_par("", style = "Normal") |>
+    
+    body_add_par("Resultados del Test de Wilcoxon por Clase de ORF", style = "heading 2") |>
+    body_add_flextable(ft_wilcox_clase) |>
+    body_add_par("", style = "Normal") |>
+    
+    body_add_par("Tamaño del Efecto en las Comparaciones por Pares", style = "heading 2") |>
+    body_add_flextable(ft_efecto) |>
+    body_add_par("", style = "Normal") |>
+    
+    body_add_par("Medianas de tAI por Categoria y Repertorio", style = "heading 2") |>
+    body_add_flextable(ft_medianas)
+  
+  #print(doc, target = file.path(ruta_guardado, paste0("Anexo_Estadistica_tAI_", Sys.Date(), ".docx")))
+    
+}
+
+grafico_ieatlas <- df_trnas(ieatlas, "ieatlas")
+grafico_two_evidences <- df_trnas(ieatlas_two_evidences, "ieatlas_two_evidences")
+
