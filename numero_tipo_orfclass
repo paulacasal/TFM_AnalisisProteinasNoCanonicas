@@ -1,4 +1,4 @@
-# figura 1D: number según orf subtype
+# figura 2A: number según orf subtype
 
 # importación paleta colores, librería y datos
 source("Yo/Figuras/library.R")
