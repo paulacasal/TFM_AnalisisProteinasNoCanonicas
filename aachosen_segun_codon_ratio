@@ -1,0 +1,314 @@
+# FIG 6: codon usage bias model ratio
+
+# importación datos, librerías y paletas colores
+source("Yo/Figuras/Setup_figuras.R")
+source("Yo/Figuras/mipaleta_aa.R")
+source("Yo/Figuras/mipaleta_orfs.R")
+source(source("Yo/Figuras/library.R"))
+
+plot_ratio_aa <- function(datos, nombre_db) {
+  mis_datos <- datos |> 
+    full_join(uniprot_cds, by = c("gene_name", "cdna", "amino_acid_sequence")) |> 
+    mutate(orf_class = if_else(!is.na(uniprot_id), "CDS", orf_class)) 
+  
+  datos_excluir <- c("CDS", "multiclass", "wrapping", "miscellaneous", "unknown ORF", 
+                     "ncRNA", "protein_coding_CDS_not_defined")
+  
+  col_noCDS <- datos_finales |> 
+    filter(!orf_class %in% datos_excluir,
+           !is.na(orf_class)) |>  
+    mutate(orf_class = "no CDS") |> 
+    # genero codones 
+    mutate(seq_codon_usage = orf_seq) |> 
+    mutate(seq_valida = str_sub(seq_codon_usage, 1, nchar(seq_codon_usage) - (nchar(seq_codon_usage) %% 3))) |>
+    mutate(codon = str_extract_all(seq_valida, ".{3}")) |>
+    unnest(codon)
+  
+  resto_col <- datos_finales |> 
+    filter(orf_class %in% niveles_permitidos) |> 
+    mutate(orf_class = case_when(
+      orf_class == "lncRNA-ORF" ~ "lncORF",
+      orf_class == "ncRNA_from_protein_coding_gene" ~ "ncORF",
+      TRUE ~ as.character(orf_class))) |> 
+    mutate(seq_codon_usage = if_else(orf_class == "CDS", cdna, orf_seq)) |> 
+    mutate(seq_valida = str_sub(seq_codon_usage, 1, nchar(seq_codon_usage) - (nchar(seq_codon_usage) %% 3))) |>
+    mutate(codon = str_extract_all(seq_valida, ".{3}")) |>
+    unnest(codon) |>
+    # quito na 
+    filter(
+      !is.na(codon), 
+      nchar(codon) == 3) 
+  
+  datos_finales <- bind_rows(col_noCDS, resto_col)
+  
+  codones_lista <- list(
+    "Phe" = c("TTT", "TTC"),
+    "Leu" = c("TTA", "TTG", "CTT", "CTC", "CTA", "CTG"),
+    "Ile" = c("ATT", "ATC", "ATA"),
+    "Met" = "ATG",
+    "Val" = c("GTT", "GTA", "GTC", "GTG"),
+    "Ser" = c("TCT", "TCA", "TCC", "TCG", "AGT", "AGC"),
+    "Pro" = c("CCT", "CCA", "CCC", "CCG"),
+    "Thr" = c("ACT", "ACA", "ACC", "ACG"),
+    "Ala" = c("GCT", "GCA", "GCC", "GCG"),
+    "Tyr" = c("TAT", "TAC"),
+    "Stop" = c("TAA", "TAG", "TGA"),
+    "His" = c("CAT", "CAC"),
+    "Gln" = c("CAA", "CAG"),
+    "Asn" = c("AAT", "AAC"),
+    "Lys" = c("AAA", "AAG"),
+    "Asp" = c("GAT", "GAC"),
+    "Glu" = c("GAA", "GAG"),
+    "Cys" = c("TGT", "TGC"),
+    "Trp" = "TGG",
+    "Arg" = c("CGT", "CGA", "CGC", "CGG", "AGA", "AGG"),
+    "Gly" = c("GGT", "GGA", "GGC", "GGG"))
+  
+  # paso la lista a df
+  mapa_codones <- enframe(codones_lista, name = "amino_acid", value = "codon") |> 
+    unnest(codon) |> 
+    # asigno el grupo funcional
+    mutate(aa_class = case_when(
+      amino_acid %in% c("Leu", "Ile", "Met", "Val", "Ala", "Gly", "Pro") ~ "non-polar aliphatic",
+      amino_acid %in% c("Phe", "Trp")                      ~ "non-polar aromatic",
+      amino_acid %in% c("Asp", "Glu")                             ~ "polar acidic",
+      amino_acid %in% c("His", "Arg", "Lys")                      ~ "polar basic",
+      amino_acid %in% c("Ser", "Gln", "Thr", "Asn", "Cys", "Tyr") ~ "polar neutral",
+      amino_acid == "Stop"                                        ~ "stop_codon"))
+  
+  # métricas
+  res_global <- datos_finales |> 
+    inner_join(mapa_codones, by = "codon") |> 
+    # Agrupo primero por clase de ORF para saber el total de codones en esa categoría
+    group_by(orf_class) |> 
+    mutate(total_codones_orf = n()) |> 
+    # Ahora cuento por cada codón individual
+    group_by(orf_class, amino_acid, codon, total_codones_orf) |> 
+    summarise(n = n(), .groups = "drop") |> 
+    mutate(
+      # Frecuencia por cada 1000 codones
+      freq = (n / total_codones_orf) * 1000) |> 
+    ungroup() # para calcular bien la frec de cds tienen que permaneces sin agruparse
+  
+  orden_codones <- unlist(codones_lista)
+  
+  res_final <- res_global |> 
+    select(codon, amino_acid, orf_class, freq) |> 
+    mutate(
+      codon = factor(codon, levels = rev(orden_codones)),
+      amino_acid = factor(amino_acid),
+      # fuerzo que el orden sea como el de los colores_orf
+      orf_class = factor(orf_class, levels = orden_orf)) |> 
+    pivot_wider(names_from = orf_class, values_from = freq, values_fill = 0) |> 
+    # Log2FC de todo frente a CDS
+    mutate(across(-c(codon, amino_acid), ~ log2((. + 0.001) / (CDS + 0.001)))) |> 
+    # formato largo para subplots de ggplot
+    pivot_longer(
+      cols = -c(codon, amino_acid), 
+      names_to = "orf_class", 
+      values_to = "ratio")
+ 
+  aa_mitad1 <- c("Leu", "Ile", "Met", "Val", "Ala", "Gly", "Pro", "Phe", "Trp", "Stop")
+  aa_mitad2 <- c("Ser", "Thr", "Gln", "Asn", "Cys", "Tyr", "His", "Lys", "Arg", "Asp", "Glu")
+  
+  diccionario_clases <- mapa_codones |> 
+    distinct(amino_acid, aa_class) |> 
+    deframe() # Esto hace que c("Phe" = "non-polar aromatic", "Leu" = "non-polar aliphatic", ...)
+  
+  # cada mitad de aa con el color correspondiente
+  colores_aa_izq <- colores_aa[diccionario_clases[aa_mitad1]]
+  colores_aa_der <- colores_aa[diccionario_clases[aa_mitad2]]
+  
+  # después del pivot longer se me descoloca todo, así que lo tengo que pasar a factor otra vez
+  orden_sin_cds <- orden_orf[orden_orf != "CDS"]
+  
+  res_final_plot <- res_final |> 
+    # no quiero ver los stops porque no generan ningún aa
+    filter(orf_class != "CDS", amino_acid != "Stop") |>
+    mutate(
+      orf_class = factor(orf_class, levels = orden_sin_cds),
+      texto_freq = sprintf("%.1f", ratio))
+  
+  pizq <- res_final_plot |> 
+    filter(amino_acid %in% aa_mitad1) |> 
+    mutate(amino_acid = factor(amino_acid, levels = aa_mitad1))
+  
+  pder <- res_final_plot |> 
+    filter(amino_acid %in% aa_mitad2) |> 
+    mutate(amino_acid = factor(amino_acid, levels = aa_mitad2))
+  
+  # subplot
+  construir_sub_plot <- function(datos_sub, colores_sub) {
+    # para que coja bien los colores habiendo quitado cds
+    clases_reales <- intersect(names(colores_orfs), unique(as.character(datos_sub$orf_class)))
+    colores_filtrados <- colores_orfs[clases_reales]
+    
+    ggplot(datos_sub, aes(x = orf_class, y = codon, fill = ratio)) +
+      geom_tile(color = "white", linewidth = 0.3) + 
+      geom_text(aes(label = texto_freq), size = 2.2, color = "black", fontface = "bold") +
+      scale_y_discrete(drop = TRUE)+
+      scale_fill_gradientn(
+        colors = c("#313695", "white", "#a50026"), 
+        name = "Freq",
+        limits = c(min(res_final_plot$ratio, na.rm = TRUE), max(res_final_plot$ratio, na.rm = TRUE))) +
+      facet_nested(
+        amino_acid ~ orf_class, 
+        # para que se expanda la celda bien
+        scales = "free", 
+        space = "free",
+        # para que sepa colorear con mis paletas
+        strip = strip_themed(
+          background_y = elem_list_rect(fill = colores_sub, color = NA),
+          background_x = elem_list_rect(fill = colores_filtrados, color = NA)
+        )) +
+      theme_minimal() +
+      theme(
+        axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 8, face = "bold", family = "mono"),
+        strip.text.y.right = element_text(angle = 0, face = "bold", size = 9, hjust = 0), 
+        strip.text.x.top = element_text(face = "bold", size = 7), 
+        #strip.background = element_blank(),
+        # para que no aparezca grid
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        # separacion entre aa
+        panel.spacing.y = unit(0.2, "lines"), 
+        panel.spacing.x = unit(0, "lines"), 
+        legend.position = "bottom") +
+      labs(y = "Codon", x = "")
+  }
+  
+  # hago por separado mitad de aa 
+  p1 <- construir_sub_plot(pizq, colores_aa_izq)
+  p2 <- construir_sub_plot(pder, colores_aa_der)
+  
+  # hago un plot de la leyenda de los colores aa_class
+  p_leyenda_aa <- ggplot() +
+    geom_point(aes(x = 1, y = 1, color = names(colores_aa)), alpha = 0) + # Puntos invisibles
+    scale_color_manual(values = colores_aa, name = "") +
+    guides(color = guide_legend(
+      override.aes = list(
+        alpha = 1, 
+        shape = 22,             # 22 es cuadrado con borde
+        size = 6, 
+        fill = colores_aa,      # pongo mi paleta de colores
+        color = "black",        # pongo borde negro porque sino el color blanco de stop queda mal
+        stroke = 0.5            # Grosor del borde negro
+      ), 
+      nrow = 1
+    )) +
+    theme_void()
+  
+  # patchwork para unir mis dos plots
+  # quito labs de p2 para que no aparezca dos veces la palabra codon
+  p_final <- (p1 | (p2 + labs(y = NULL))) + p_leyenda_aa +
+    plot_layout(guides = "collect") + 
+    plot_annotation(
+      title = "Codon frequency Log2FC vs CDS",
+      subtitle = nombre_db,
+      theme = theme(
+        # titulo a la izq
+        plot.title = element_text(hjust = 0.1, face = "bold", size = 14),
+        plot.subtitle = element_text(hjust = 0.1, size = 12),
+        legend.position = "bottom",
+        legend.justification = "left", # Mueve todo el bloque de la leyenda a la izquierda
+        legend.box.just = "left"))
+  
+  
+  #print(p_final)
+  plot(p_final)
+  
+  
+  ## ESTADÍSTICA
+  # Ruta 
+  ruta_guardado <- "C:/Users/paula/UNAV/TFM/Yo/Figuras/estadisticos"
+  
+  Fig2E_codonfreqaa <- paste0("tabla_datos_figura_2E_codonfreqaa_", nombre_db, "_", Sys.Date(), ".xlsx")
+  ruta_completa <- file.path(ruta_guardado, Fig2E_codonfreqaa)
+  
+  wb <- createWorkbook()
+  
+  # datos usados 
+  addWorksheet(wb, "res_global")
+  writeData(wb, "res_global", res_global)
+  
+  # frente a cds
+  addWorksheet(wb, "res_final")
+  writeData(wb, "res_final", res_final)
+  
+  # dado que tengo el conteo absoluto del codon y el total de codones en esa 
+  # clase de orf, uso chi2
+  stats_codones <- res_global |>
+    group_by(amino_acid, codon) |>
+    # codón al menos 2 clases para poder comparar
+    filter(n() > 1) |>
+    nest() |>
+    mutate(
+      test_prop = map(data, ~ {
+        # "éxitos" (n) vs "intentos totales" (total_codones_orf) entre los grupos
+        prop.test(x = .x$n, n = .x$total_codones_orf)
+      }),
+      resultados = map(test_prop, tidy)
+    ) |>
+    unnest(resultados) |>
+    ungroup() |>
+    dplyr::select(
+      `Aminoácido` = amino_acid,
+      `Codón` = codon,
+      `Chi-cuadrado` = statistic,
+      `p-valor bruto` = p.value
+    ) |>
+    mutate(
+      `p-valor aj. (FDR)` = p.adjust(`p-valor bruto`, method = "fdr"),
+      # añado significación
+      Significación = rstatix::add_significance(
+        # fdr porque bonferroni divide entre el nivel de significancia entre el 
+        # numero de comparaciones, en este caso ~60!!!
+        data = data.frame(p = `p-valor aj. (FDR)`), 
+        p.col = "p"
+      )$p.signif
+    ) 
+  
+  addWorksheet(wb, "stats_codones")
+  writeData(wb, "stats_codones", stats_codones)
+  
+  # Guardar
+  saveWorkbook(wb, ruta_completa, overwrite = TRUE)
+  
+  
+  
+  # anexo
+  borde_vertical <- fp_border(color = "black", width = 1)
+  
+  ft_codones_stat <- stats_codones |>
+    flextable() |>
+    set_caption(caption = "Análisis comparativo de la frecuencia de uso de codones entre las distintas clases de ORF (Test de proporciones con corrección FDR).") |>
+    colformat_double(j = c("Chi-cuadrado", "p-valor bruto", "p-valor aj. (FDR)"), digits = 4) |>
+    theme_vanilla() |>
+    font(fontname = "Times New Roman", part = "all") |>
+    fontsize(size = 9, part = "all") |>
+    padding(padding.top = 3, padding.bottom = 3, part = "all") |>
+    align(align = "center", part = "all") |>
+    align(j = c("Aminoácido", "Codón"), align = "left", part = "body") |>
+    border_inner_v(border = borde_vertical) |> 
+    border_outer(border = borde_vertical) |>
+    autofit() |>
+    fit_to_width(max_width = 6.0)
+  
+  doc <- read_docx() |>
+    body_add_par("ANEXO: TABLAS DE RESULTADOS ESTADÍSTICOS SESGO USO CODONES", style = "heading 1") |>
+    
+    # plot1
+    body_add_par( "Análisis comparativo de la frecuencia de uso de codones entre las distintas clases de ORF (Test de proporciones con corrección FDR).", style = "heading 2") |>
+    body_add_flextable(ft_codones_stat) |>
+    body_add_par("", style = "Normal") |>
+    body_add_flextable(ft_codones_stat) 
+  
+  # Guardar el archivo final
+  print(doc, target = "Anexos_TFM_CodonFreqAA_ieatlastwoevidences.docx")
+  
+}
+
+grafico_ieatlas <- plot_ratio_aa(ieatlas, "ieatlas")
+grafico_two_evidences <- plot_ratio_aa(ieatlas_two_evidences, "ieatlas_two_evidences")
+
