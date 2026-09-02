@@ -1,0 +1,167 @@
+# figura 2B = violin plot con boxplot para ver len de los aa
+
+# importación paleta colores y librería
+source("Yo/Figuras/library.R")
+source("Yo/Figuras/mipaleta_orfs.R")
+source("Yo/Figuras/Setup_figuras.R")
+
+plot_orf_len <- function(datos, nombre_db) {
+  # mis datos y les inserto la info de canónicas
+  datos_finales <- datos |> 
+    full_join(uniprot_cds, by = c("gene_name", "cdna", "amino_acid_sequence")) |> 
+    mutate(orf_class = if_else(!is.na(uniprot_id), "CDS", orf_class)) 
+  # categorías excluidas de los análisis
+  datos_excluir <- c("CDS", "multiclass", "wrapping", "miscellaneous", "unknown ORF", 
+                     "ncRNA", "protein_coding_CDS_not_defined")
+  # columna no CDS con todos mis orfclass no canónicos para facilitar comparación con CDS
+  col_noCDS <- datos_finales |> 
+    filter(!orf_class %in% datos_excluir,
+           !is.na(orf_class)) |>  
+    mutate(orf_class = "no CDS")
+  
+  resto_col <- datos_finales |> 
+    filter(orf_class %in% niveles_permitidos) |> 
+    mutate(orf_class = case_when(
+      orf_class == "lncRNA-ORF" ~ "lncORF",
+      orf_class == "ncRNA_from_protein_coding_gene" ~ "ncORF",
+      TRUE ~ as.character(orf_class))) 
+  # base de datos lista
+  datos_plot <- bind_rows(col_noCDS, resto_col)
+  
+  
+  # creo variable longitud
+  datos_len <- datos_plot |> 
+    mutate(len = nchar(amino_acid_sequence)) |> 
+    filter(!is.na(orf_class), !is.na(len)) |> 
+    mutate(orf_class = factor(orf_class, levels = orden_orf))
+  
+  # preparo tabla con la media y más estadísticos de interés
+  medias <- datos_len |> 
+    group_by(orf_class) |> 
+    summarise(
+      n = n(),
+      min_len = min(len, na.rm = TRUE),
+      median_len = median(len, na.rm = TRUE),
+      mean_len = mean(len, na.rm = TRUE),
+      max_len = max(len, na.rm = TRUE)
+    )
+  
+  # los uno para plotear el valor en el gráfico
+  p2 <- datos_len |> 
+    left_join(medias |> 
+                select(orf_class, mean_len), by = "orf_class")
+  
+  plot1_E <- ggplot(p2, aes(x = orf_class, y = len, fill = orf_class)) +
+    geom_violin(trim = TRUE, alpha = 0.7, color=NA, width=0.7) +
+    geom_boxplot(width = 0.1, outlier.shape = NA, color = "black",show.legend = FALSE) +
+    # añado la media como texto encima de cada violín
+    geom_text(
+      aes(
+        y = mean_len,
+        label = sprintf("%.1f", mean_len)
+      ),
+      vjust = -7,
+      size = 4.5,
+      fontface = "bold",
+      color = "black",
+      position = position_dodge(width = 0.7)
+    ) +
+    guides(fill = guide_legend(override.aes = list(color = "black", linewidth = 0.7))) +
+    scale_y_continuous(
+      trans = "log10", 
+      expand = expansion(mult = c(0.1, 0.2))) +
+    scale_fill_manual(values = colores_orfs) +
+    labs(
+      subtitle = nombre_db,
+      x = "ORF subtype",
+      y = "Size (amino acids)") +
+    theme_minimal(base_size = 15) +
+    theme(
+      axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 1, lineheight = 0.9),
+      axis.line.x = element_line(color = "black", linewidth = 0.8),
+      panel.grid.major.x = element_blank(),
+      panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.8),
+      legend.position = "right",
+      plot.margin = margin(t = 10, r = 15, b = 40, l = 10, unit = "pt")
+    )
+  
+  print(plot1_E)
+  
+  ## ESTADÍSTICOS 
+  # quiero ver si hay diferencia entre medias
+  
+  # Ruta 
+  ruta_guardado <- "C:/Users/paula/UNAV/TFM/Yo/Figuras/estadisticos"
+  
+  tabla_datos_figura_1E <- paste0("tabla_datos_figura_1E_", nombre_db, "_", Sys.Date(), ".xlsx")
+  ruta_completa <- file.path(ruta_guardado, tabla_datos_figura_1E)
+  
+  wb <- createWorkbook()
+  
+  addWorksheet(wb, "medias_len")
+  writeData(wb, "medias_len", medias)
+  
+  # preparo tabla datos para hacer estadística
+  datos_stats <- p2 |> 
+    select(len, orf_class)
+
+  # alternativa no paramétrica al anova
+  test_kruskal <- kruskal.test(len ~ as.factor(orf_class), data = datos_stats)
+  kruskal_df <- tidy(test_kruskal)
+  
+  addWorksheet(wb, "kruskal_df")
+  writeData(wb, "kruskal_df", kruskal_df)
+  
+  # como hay diferencias, voy a ver entre cuáles. +3 grupos datos independientes
+  # es posthoc dunn
+  dunn_df <- datos_stats |> 
+    dunn_test(
+      len ~ orf_class,
+      p.adjust.method = "bonferroni"
+    )
+  
+  addWorksheet(wb, "dunn_df")
+  writeData(wb, "dunn_df", dunn_df)
+  
+  # Guardar
+  # saveWorkbook(wb, ruta_completa, overwrite = TRUE)
+  
+  # ANEXO
+  borde_vertical <- fp_border(color = "black", width = 0.5)
+  
+  ft_longitud <- medias |>
+    dplyr::rename(
+      `Clase de ORF` = orf_class,
+      `N` = n,
+      `Mínimo` = min_len,
+      `Mediana` = median_len,
+      `Media` = mean_len,
+      `Máximo` = max_len
+    ) |>
+    flextable() |>
+    set_caption(caption = "Resumen descriptivo de la longitud de las ORFs por clase de ORF.") |>
+    colformat_int(j = c("N", "Mínimo", "Mediana", "Máximo")) |>
+    colformat_double(j = "Media", digits = 2) |>
+    theme_vanilla() |>
+    font(fontname = "Times New Roman", part = "all") |>
+    fontsize(size = 9, part = "all") |>
+    border_inner_v(border = borde_vertical) |>
+    border_inner_h(border = borde_vertical) |>
+    border_outer(border = borde_vertical) |>
+    autofit()
+  
+  doc <- read_docx() |> 
+    body_add_par("Anexo: Longitud de las ORFs", style = "heading 1") |>
+    body_add_par("Resumen descriptivo de la longitud de las ORFs para cada clase analizada.", style = "Normal") |>
+    body_add_par("", style = "Normal") |> 
+    body_add_flextable(ft_longitud)
+  
+  
+  #print(doc, target = "Anexo_Longitud_ORF.docx")
+  
+  }
+
+grafico_ieatlas <- plot_orf_len(ieatlas, "ieatlas")
+grafico_two_evidences <- plot_orf_len(ieatlas_two_evidences, "ieatlas_two_evidences")
+
+
