@@ -1,0 +1,374 @@
+### Figura 5B: estudio del porcentaje de GC content. Se ha visto que un porcentaje superior al 60% desestabiliza a las proteínas
+# análisis GC global y GC en posición 1 y 2 (GC12)
+
+# importación paleta colores y librería
+source("Yo/Figuras/library.R")
+source("Yo/Figuras/mipaleta_orfs.R")
+source("Yo/Figuras/Setup_figuras.R")
+
+gc12_gc123 <- function(datos, nombre_db) {
+  datos_finales <- datos |> 
+    full_join(uniprot_cds, by = c("gene_name", "cdna", "amino_acid_sequence")) |> 
+    mutate(orf_class = if_else(!is.na(uniprot_id), "CDS", orf_class)) 
+  
+  datos_excluir <- c("CDS", "multiclass", "wrapping", "miscellaneous", "unknown ORF", 
+                     "ncRNA", "protein_coding_CDS_not_defined")
+  
+  col_noCDS <- datos_finales |> 
+    filter(!orf_class %in% datos_excluir,
+           !is.na(orf_class)) |>  
+    mutate(orf_class = "no CDS")
+  
+  resto_col <- datos_finales |> 
+    filter(orf_class %in% niveles_permitidos) |> 
+    mutate(orf_class = case_when(
+      orf_class == "lncRNA-ORF" ~ "lncORF",
+      orf_class == "ncRNA_from_protein_coding_gene" ~ "ncORF",
+      TRUE ~ as.character(orf_class))) 
+  
+  datos_plot <- bind_rows(col_noCDS, resto_col)
+  
+  datos_gc_plot <- datos_plot |> 
+    mutate(codones_seq = if_else(orf_class == "CDS", cdna, orf_seq)) |> 
+    filter(!is.na(codones_seq)) |> 
+    mutate(codones_seq = substr(codones_seq, 1, (nchar(codones_seq) %/% 3) * 3)) |> 
+    # elimino la tercera base vectorialmente, así va rápido en vez de tener que detectar en texto
+    mutate(seq_pos12 = str_replace_all(codones_seq, "(.{2}).", "\\1")) |> 
+    # Calculao gc12 y gc123
+    mutate(
+      gc12   = str_count(seq_pos12, "[GC]"),
+      tot12  = nchar(seq_pos12),
+      GC12   = round(100 * gc12 / tot12, 3),
+      
+      gc123  = str_count(codones_seq, "[GC]"),
+      tot123 = nchar(codones_seq),
+      GC123  = round(100 * gc123 / tot123, 3) ) |> 
+    filter(!is.na(GC12), !is.na(GC123)) |> 
+    mutate(orf_class = factor(orf_class, levels = orden_orf))
+  
+  # figura 5A: g12
+  p1 <- ggplot(datos_gc_plot, aes(x = orf_class, y = GC12, fill = orf_class)) +
+    geom_violin(alpha = 0.7, scale = "width") +
+    geom_boxplot(width = 0.15, outlier.shape = NA, alpha = 0.8, show.legend = FALSE) +
+    scale_fill_manual(values = colores_orfs) +
+    scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 10)) +
+    labs(
+      title = "GC content in first and second position",
+      subtitle = nombre_db,
+      x = "ORF Class",
+      y = "GC12"
+    ) +
+    theme_minimal(base_size = 15) +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      axis.text.x = element_blank(),
+      legend.position = "right"
+    )
+  
+  print(p1)
+  
+  # figura 5B: g123
+  p2 <- ggplot(datos_gc_plot, aes(x = orf_class, y = GC123, fill = orf_class)) +
+    geom_violin(alpha = 0.7, scale = "width") +
+    geom_boxplot(width = 0.15, outlier.shape = NA, alpha = 0.8, show.legend = FALSE) +
+    scale_fill_manual(values = colores_orfs) +
+    scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 10)) +
+    labs(
+      title = "Global GC content",
+      subtitle = nombre_db,
+      x = "ORF Class",
+      y = "GC123"
+    ) +
+    theme_minimal(base_size = 15) +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      axis.text.x = element_blank(),
+      legend.position = "right"
+    )
+  
+  print(p2)
+  
+  # comrpuebo normalidad de grupos aunque seguramente no haya: más fácil visualmente
+  # hist
+  p3 <- ggplot(datos_gc_plot, aes(x = GC12, fill = orf_class)) +
+    geom_histogram(bins = 120, color = "deeppink2", alpha = 0.6) +
+    scale_fill_manual(values = colores_orfs) +
+    facet_wrap(~ orf_class, scales = "free") + 
+    labs(title = "Distribución de GC12 por ORF Class",
+         subtitle = nombre_db,
+         x = "N codones",
+         y = "Freq") +
+    theme_minimal(base_size = 15) +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      axis.text.x = element_blank(),
+      legend.position = "right"
+    )
+  
+  print(p3)
+  
+  p4 <- ggplot(datos_gc_plot, aes(x = GC123, fill = orf_class)) +
+    geom_histogram(bins = 120, color = "deeppink3", alpha = 0.6) +
+    scale_fill_manual(values = colores_orfs) +
+    facet_wrap(~ orf_class, scales = "free") + 
+    labs(title = "Distribución de GC123 por ORF Class",
+         subtitle = nombre_db,
+         x = "N codones",
+         y = "Freq") +
+    theme_minimal(base_size = 15) +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      axis.text.x = element_blank(),
+      legend.position = "right"
+    )
+  
+  print(p4)
+  
+  # test de normalidad para corroborar graf: mis datos no siguen normalidad
+  set.seed(123)
+  t_normalidad <- datos_gc_plot |> 
+    group_by(orf_class)  |> 
+    slice_sample(n = 4000) |> 
+    summarise(
+      GC12_shapirop = shapiro.test(GC12)$p.value,
+      GC123_shapirop = shapiro.test(GC123)$p.value
+    )
+  
+  # ver diferencias
+  # entre orfclass dentro gc12
+  kruskaltest_g12 <- kruskal.test(GC12 ~ orf_class, data = datos_gc_plot)
+  # datos htest hay que pasarlos a df para que openxl funcione bien
+  kruskal_g12_df <- data.frame(Metodo = kruskaltest_g12$method, 
+                               Estadistico = kruskaltest_g12$statistic, 
+                               p_val = kruskaltest_g12$p.value)
+  # ver cuales son significativamente estadísticos
+  bonferroni_g12 <- datos_gc_plot |> 
+    pairwise_t_test(GC12 ~ orf_class, 
+                    p.adjust.method = "bonferroni",      
+                    pool.sd = FALSE)
+  # ver tamaño efecto
+  eta_g12 <- eta_squared(aov(GC12 ~ orf_class, data = datos_gc_plot))
+  eta_g12_df <- as.data.frame(eta_g12)
+  
+  # " gc123
+  kruskaltest_g123 <- kruskal.test(GC123 ~ orf_class, data = datos_gc_plot)
+  kruskal_g123_df <- data.frame(Metodo = kruskaltest_g123$method, 
+                               Estadistico = kruskaltest_g12$statistic, 
+                               p_val = kruskaltest_g123$p.value)
+  # ver cuáles son significativamente estadísticos
+  bonferroni_g123 <- datos_gc_plot |> 
+    pairwise_t_test(GC123 ~ orf_class, 
+                    p.adjust.method = "bonferroni",      
+                    pool.sd = FALSE)
+  # ver tamaño efecto
+  eta_g123 <- eta_squared(aov(GC123 ~ orf_class, data = datos_gc_plot))
+  eta_g123_df <- as.data.frame(eta_g123)
+  
+  # también quiero ver si hay diferencias de porcentaje de gc entre solo 2 pos y las 3
+  # tengo que hacer pivot longer para comparar
+  datos_largos <- datos_gc_plot |> 
+    select(gene_name, orf_class, GC12, GC123) |> 
+    pivot_longer(cols = c(GC12, GC123), 
+                 names_to = "tipo_gc", 
+                 values_to = "porcentaje")
+  
+  bonferroni_g12g123 <- datos_largos  |> 
+    group_by(orf_class)  |> 
+    pairwise_wilcox_test(porcentaje ~ tipo_gc, 
+                         paired = TRUE, 
+                         p.adjust.method = "bonferroni")
+  
+  # y correlación: alta, cerca 1, me dice que gc es similar en todas pos, baja que se comporta fierente
+  cor_g12g123 <- datos_gc_plot  |> 
+    group_by(orf_class) |> 
+    summarise(
+      cor_pearson = cor(GC12, GC123), # que aumente gc12 es proporcional al aumento de gc123
+      cor_spearman = cor(GC12, GC123, method = "spearman") # si sale igual que pearson lineal
+      # si sale mayor hay relación fuerte pero no lineal
+    )
+  
+  # añado media para ver difs mejor
+  mediag12_g123 <- datos_gc_plot |>  
+    group_by(orf_class) |> 
+    summarise(
+      n = n(),
+      GC12_mean = mean(GC12, na.rm = TRUE),
+      GC12_median = median(GC12, na.rm = TRUE),
+      GC12_sd = sd(GC12, na.rm = TRUE),
+      GC123_mean = mean(GC123, na.rm = TRUE),
+      GC123_median = median(GC123, na.rm = TRUE),
+      GC123_sd = sd(GC123, na.rm = TRUE)
+    )
+  
+  
+  # Ruta 
+  ruta_guardado <- "C:/Users/paula/UNAV/TFM/Yo/Figuras/estadisticos"
+  
+  estadisticos_g12_g123 <- paste0("Resultados_g12g123_", nombre_db, "_", Sys.Date(), ".xlsx")
+  ruta_completa <- file.path(ruta_guardado, estadisticos_g12_g123)
+  
+  wb <- createWorkbook()
+  
+  addWorksheet(wb, "t_normalidad")
+  writeData(wb, "t_normalidad", t_normalidad)
+  
+  addWorksheet(wb, "kruskal_g12")
+  writeData(wb, "kruskal_g12", kruskal_g12_df)
+  
+  addWorksheet(wb, "bonferroni_g12")
+  writeData(wb, "bonferroni_g12", bonferroni_g12)
+  
+  addWorksheet(wb, "eta_g12")
+  writeData(wb, "eta_g12", eta_g12_df)
+  
+  addWorksheet(wb, "kruskal_g123")
+  writeData(wb, "kruskal_g123", kruskal_g123_df)
+  
+  addWorksheet(wb, "bonferroni_g123")
+  writeData(wb, "bonferroni_g123", bonferroni_g123)
+  
+  addWorksheet(wb, "eta_g123")
+  writeData(wb, "eta_g123", eta_g123_df)
+  
+  addWorksheet(wb, "bonferroni_g12g123")
+  writeData(wb, "bonferroni_g12g123", bonferroni_g12g123)
+  
+  addWorksheet(wb, "cor_g12g123")
+  writeData(wb, "cor_g12g123", cor_g12g123)
+  
+  addWorksheet(wb, "mediag12_g123")
+  writeData(wb, "mediag12_g123", mediag12_g123)
+  
+  # Guardar
+  #saveWorkbook(wb, ruta_completa, overwrite = TRUE)
+  
+  
+  
+  ## ANEXO
+  borde_vertical <- fp_border(color = "black", width = 0.5)
+  
+  tabla_descriptivos_norm <- mediag12_g123 |>
+    left_join(t_normalidad, by = "orf_class")
+  
+  ft_descriptivos_norm <- tabla_descriptivos_norm |>
+    dplyr::rename(
+      `Clase de ORF` = orf_class,
+      `n` = n,
+      `Media GC12` = GC12_mean,
+      `Mediana GC12` = GC12_median,
+      `DE GC12` = GC12_sd,
+      `Shapiro p (GC12)` = GC12_shapirop,
+      `Media GC123` = GC123_mean,
+      `Mediana GC123` = GC123_median,
+      `DE GC123` = GC123_sd,
+      `Shapiro p (GC123)` = GC123_shapirop
+    ) |>
+    flextable() |>
+    set_caption(caption = "Estadísticos descriptivos (media, mediana, desviación estándar) y contraste de normalidad de Shapiro-Wilk para el contenido de GC (GC12 y GC123) por clase de ORF.") |>
+    colformat_double(j = c("Media GC12", "Mediana GC12", "DE GC12", "Media GC123", "Mediana GC123", "DE GC123"), digits = 2) |>
+    colformat_double(j = c("Shapiro p (GC12)", "Shapiro p (GC123)"), digits = 4) |>
+    theme_vanilla() |>
+    font(fontname = "Times New Roman", part = "all") |>
+    fontsize(size = 9, part = "all") |>
+    border_inner_v(border = borde_vertical) |>
+    border_outer(border = borde_vertical) |>
+    autofit()
+  
+
+  ft_bonferroni_g12g123 <- bonferroni_g12g123 |>
+    select(any_of(c("orf_class", "group1", "group2", "n1", "n2", "statistic", "p", "p.adj", "p.adj.signif"))) |>
+    dplyr::rename(
+      `Clase de ORF` = orf_class,
+      `Grupo 1` = group1,
+      `Grupo 2` = group2,
+      `Estadístico (V)` = statistic,
+      `Valor p` = p,
+      `Valor p (Bonf.)` = p.adj,
+      `Significancia` = p.adj.signif
+    ) |>
+    flextable() |>
+    set_caption(caption = "Prueba de rangos con signo de Wilcoxon para muestras emparejadas entre el contenido de GC12 y GC123 por tipo de ORF.") |>
+    colformat_double(j = c("Valor p", "Valor p (Bonf.)"), digits = 4) |>
+    theme_vanilla() |>
+    font(fontname = "Times New Roman", part = "all") |>
+    fontsize(size = 9, part = "all") |>
+    border_inner_v(border = borde_vertical) |>
+    border_outer(border = borde_vertical) |>
+    autofit()
+  
+
+  ft_correlaciones <- cor_g12g123 |>
+    dplyr::rename(
+      `Clase de ORF` = orf_class,
+      `Pearson (r)` = cor_pearson,
+      `Spearman (rho)` = cor_spearman
+    ) |>
+    flextable() |>
+    set_caption(caption = "Coeficientes de correlación lineal (Pearson) y no lineal (Spearman) entre el contenido de GC12 y GC123 según la clase de ORF.") |>
+    colformat_double(j = c("Pearson (r)", "Spearman (rho)"), digits = 4) |>
+    theme_vanilla() |>
+    font(fontname = "Times New Roman", part = "all") |>
+    fontsize(size = 9, part = "all") |>
+    border_inner_v(border = borde_vertical) |>
+    border_outer(border = borde_vertical) |>
+    autofit()
+
+  
+  ft_bonferroni_subtipos_g123 <- bonferroni_g123 |>
+    select(any_of(c("group1", "group2", "n1", "n2", "statistic", "p", "p.adj", "p.adj.signif"))) |>
+    dplyr::rename(
+      `Subtipo 1` = group1,
+      `Subtipo 2` = group2,
+      `Estadístico` = statistic,
+      `Valor p` = p,
+      `Valor p (Bonf.)` = p.adj,
+      `Significancia` = p.adj.signif
+    ) |>
+    flextable() |>
+    set_caption(caption = "Comparaciones por pares (con corrección de Bonferroni) 
+                para el contenido de GC123 entre las distintas clases de ORFs.") |>
+    colformat_double(j = c("Valor p", "Valor p (Bonf.)"), digits = 4) |>
+    theme_vanilla() |>
+    font(fontname = "Times New Roman", part = "all") |>
+    fontsize(size = 9, part = "all") |>
+    border_inner_v(border = borde_vertical) |>
+    border_outer(border = borde_vertical) |>
+    autofit()
+  
+  # word
+  doc <- read_docx() |>
+    body_add_par("Anexo: Análisis Estadístico de la Composición de Nucleótidos (Contenido GC)", 
+                 style = "heading 1") |>
+    body_add_par("Evaluación rigurosa de la distribución del contenido de GC en las dos 
+                 primeras posiciones del codón (GC12) e incluyendo la tercera posición (GC123) 
+                 a través de las distintas categorías de ORFs. Ante el rechazo de la hipótesis
+                 de normalidad mediante la prueba de Shapiro-Wilk (p < 0.05), se aplicaron contrastes 
+                 no paramétricos de Kruskal-Wallis, pruebas de Wilcoxon emparejadas y coeficientes de
+                 correlación de Pearson y Spearman.", style = "Normal") |>
+    body_add_par("", style = "Normal") |>
+    
+    body_add_par("Estadísticos Descriptivos y Prueba de Normalidad", style = "heading 2") |>
+    body_add_flextable(ft_descriptivos_norm) |>
+    body_add_par("", style = "Normal") |>
+    
+    body_add_par("Diferencias Emparejadas entre Posiciones del Codón (GC12 vs. GC123)", style = "heading 2") |>
+    body_add_flextable(ft_bonferroni_g12g123) |>
+    body_add_par("", style = "Normal") |>
+    
+    body_add_par("Análisis de Correlación Intra-ORF (GC12 vs. GC123)", style = "heading 2") |>
+    body_add_flextable(ft_correlaciones) |>
+    body_add_par("", style = "Normal") |>
+    
+    body_add_par("Comparaciones por Pares del Contenido Global de GC (GC123) entre Clases de ORF", style = "heading 2") |>
+    body_add_flextable(ft_bonferroni_subtipos_g123)
+  
+  # Guardar documento
+  print(doc, target = file.path(ruta_guardado, paste0("Anexo_Estadistica_GC_", Sys.Date(), ".docx")))
+  
+}
+
+grafico_ieatlas <- gc12_gc123(ieatlas, "ieatlas")
+grafico_two_evidences <- gc12_gc123(ieatlas_two_evidences, "ieatlas two evidences")
+
+print(grafico_ieatlas)
+print(grafico_two_evidences)
