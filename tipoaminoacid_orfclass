@@ -1,0 +1,390 @@
+# Figura 7A: heatmap aminoacido
+
+# librerías
+source("Yo/Figuras/library.R")
+# mis datos
+source("Yo/Figuras/Setup_figuras.R")
+# mi paleta de colores para orfclass
+source("Yo/Figuras/mipaleta_orfs.R")
+# mi paleta de colores para aa_class
+source("Yo/Figuras/mipaleta_aa.R")
+
+plot_aa <- function(datos, nombre_db) {
+  mis_datos <- datos |> 
+    full_join(uniprot_cds, by = c("gene_name", "cdna", "amino_acid_sequence")) |> 
+    mutate(orf_class = if_else(!is.na(uniprot_id), "CDS", orf_class)) 
+  
+  datos_excluir <- c("CDS", "multiclass", "wrapping", "miscellaneous", "unknown ORF", 
+                     "ncRNA", "protein_coding_CDS_not_defined")
+  
+  col_noCDS <- mis_datos |> 
+    filter(!orf_class %in% datos_excluir,
+           !is.na(orf_class)) |>  
+    mutate(orf_class = "no CDS")
+  
+  resto_col <- mis_datos |> 
+    filter(orf_class %in% niveles_permitidos) |> 
+    mutate(orf_class = case_when(
+      orf_class == "lncRNA-ORF" ~ "lncORF",
+      orf_class == "ncRNA_from_protein_coding_gene" ~ "ncORF",
+      TRUE ~ as.character(orf_class))) 
+  
+  datos_finales <- bind_rows(col_noCDS, resto_col)
+  
+  # lista aa
+  amino_acids <- c("A", "R", "N", "D", "C", "Q", "E", "G", "H", "I", 
+                   "L", "K", "M", "F", "P", "S", "T", "W", "Y", "V")
+  
+  composicion_aa <- datos_finales |>
+    filter(!is.na(amino_acid_sequence), nchar(amino_acid_sequence) > 0) |>
+    mutate(aa = str_split(amino_acid_sequence, "")) |>
+    unnest(aa) |>
+    filter(aa %in% amino_acids) |>
+    count(orf_class, AA = aa, name = "n_total") |>
+    group_by(orf_class) |>
+    mutate(freq = 100 * n_total / sum(n_total)) |>
+    ungroup() |> 
+    mutate(orf_class = factor(orf_class, levels = orden_orf))
+  
+  # plot 7A
+  p1 <- ggplot(composicion_aa, aes(x = AA, y = factor(orf_class, levels = rev(orden_orf)), fill = freq)) +
+    geom_tile(color = NA, linewidth = 0.1) +
+    coord_fixed() + # para tener cuadraditos
+    scale_fill_gradientn(
+      colors = c("#4575b4", "pink2", "#a50026"),
+      name = "Frecuency") +
+    labs(
+      title = "Amino Acid Usage Enrichment",
+      subtitle = nombre_db,
+      x = "Amino Acid",
+      y = "ORF Class") +
+    theme_minimal(base_size = 12) +
+    theme(
+      axis.text.x = element_text(face = "bold"),
+      axis.text.y = element_text(face = "bold"),
+      panel.grid = element_blank(),
+      aspect.ratio = 0.5)
+  
+  print(p1)
+  
+  ##### si CDS es 1
+  matriz_aa <- composicion_aa |>
+    select(orf_class, AA, freq) |>
+    pivot_wider(names_from = orf_class, values_from = freq)
+  
+  # Log2 Fold Change respecto a la columna CDS
+  # Uso (0.0001) para evitar problemas con ceros
+  matriz_fc <- matriz_aa |>
+    mutate(across(-AA, ~ log2((. + 0.001) / (CDS + 0.001)))) |>
+    select(-CDS) # CDS ahora sería todo 0, así que lo quitamos para el gráfico
+  
+  # Formato largo para ggplot
+  df_fc_long <- matriz_fc |>
+    pivot_longer(cols = -AA, names_to = "orf_class", values_to = "LFC")
+  
+  # Ajustamos el orden de los ORFs (sin el CDS que ya no está)
+  orden_sin_cds <- orden_orf[orden_orf != "CDS"]
+  
+  # hago rango específico para mejorar visibilidad de lncORF, para eso miro el rango de lfc de lncORF
+  df_fc_long_m <- df_fc_long |> 
+    filter(orf_class == "lncORF") |>  
+    summarise(min_LFC = min(LFC, na.rm=T), 
+              max_LFC = max(LFC, na.rm=T))  
+    
+  p2 <- ggplot(df_fc_long, aes(x = AA, y = factor(orf_class, levels = rev(orden_sin_cds)), fill = LFC)) +
+    geom_tile(color = NA) +
+    coord_fixed() +
+    scale_fill_gradientn(
+      colors = c("#313695", "#74add1", "white", "pink2", "#a50026"),
+      # fuerzo que el color oscuro empiece ya en valores bajos (-0.2 y 0.2)
+      values = scales::rescale(c(-1.8, -0.15, 0, 0.15, 1.8)), 
+      limits = c(-1.8, 1.8),
+      oob = scales::squish, 
+      name = "Log2(FC)") +
+    labs(
+      title = "Amino Acid Enrichment vs CDS",
+      subtitle = nombre_db,
+      x = "Amino Acid",
+      y = "ORF Subtype") +
+    theme_minimal(base_size=12) +
+    theme(
+      axis.text.x = element_text(face = "bold"),
+      axis.text.y = element_text(face = "bold"),
+      panel.grid = element_blank())
+  
+  print(p2)
+  
+  # ahora con los aa ordenados por función
+  # lista aa
+  amino_acids_f <- c(
+    # non-polar aliphatic
+    "L", "I", "M", "V", "A", "G", "P",
+    # non-polar aromatic
+    "F", "W",
+    # polar acidic
+    "D", "E",
+    # polar basic
+    "H", "R", "K",
+    # polar neutral
+    "S", "Q", "T", "N", "C", "Y") 
+  
+  composicion_aa_f <- datos_finales |>
+    filter(!is.na(amino_acid_sequence), nchar(amino_acid_sequence) > 0) |>
+    mutate(aa = str_split(amino_acid_sequence, "")) |>
+    unnest(aa) |>
+    mutate(aa = factor(aa)) |> 
+    filter(aa %in% amino_acids_f) |>
+    count(orf_class, AA = aa, name = "n_total") |>
+    group_by(orf_class) |>
+    mutate(freq = 100 * n_total / sum(n_total)) |>
+    ungroup() |> 
+    mutate(orf_class = factor(orf_class, levels = orden_orf))
+  
+  ##### si CDS es 1
+  matriz_aa_f <- composicion_aa_f |>
+    select(orf_class, AA, freq) |>
+    # fuerzo que aa sea un factor para reordenar
+    mutate(AA = factor(AA, levels = amino_acids_f)) |>
+    # ahora ordeno según el nuevo orden que he creado en aminoacidsf
+    arrange(AA) |> 
+    pivot_wider(names_from = orf_class, values_from = freq)
+  
+  # Log2 Fold Change respecto a la columna CDS
+  # Uso (0.0001) para evitar problemas con ceros
+  matriz_fc_f <- matriz_aa_f |>
+    mutate(across(-AA, ~ log2((. + 0.001) / (CDS + 0.001)))) |>
+    select(-CDS) # CDS ahora sería todo 0, así que lo quitamos para el gráfico
+
+  df_fc_long_f <- matriz_fc_f |> 
+    mutate(aa_class = case_when(
+    AA %in% c("L", "I", "M", "V", "A", "G", "P") ~ "non-polar \naliphatic",
+    AA %in% c("F", "W")                      ~ "non-polar \naromatic",
+    AA %in% c("D", "E")                             ~ "polar \nacidic",
+    AA %in% c("H", "R", "K")                      ~ "polar \nbasic",
+    AA %in% c("S", "Y", "Q", "T", "N", "C") ~ "polar \nneutral")) |> 
+    pivot_longer(
+      cols = -c(AA, aa_class),
+      names_to = "orf_class",
+      values_to = "LFC")
+  
+  diccionario_clases <- df_fc_long_f |>
+    distinct(AA, aa_class) |> 
+    deframe()
+  
+  # uso el mismo rango que miré arriba ya que, son los mismo datos
+  
+  # ajusto el orden (sin el CDS que ya no está)
+  orden_sin_cds <- orden_orf[orden_orf != "CDS"]
+
+  # plot 7A
+  p3 <- ggplot(df_fc_long_f, aes(x = AA, y = factor(orf_class, levels = rev(orden_sin_cds)), fill = LFC)) +
+    geom_tile(color = NA) +
+    facet_grid(. ~ aa_class, scales = "free_x", space = "free_x") +
+    scale_fill_gradientn(
+      colors = c("#313695", "#74add1", "white", "pink2", "#a50026"),
+      # fuerzo que el color oscuro empiece ya en valores bajos (-0.2 y 0.2)
+      values = scales::rescale(c(-1.8, -0.15, 0, 0.15, 1.8)), 
+      limits = c(-1.8, 1.8),
+      oob = scales::squish, 
+      name = "Log2(FC)") +
+    labs(
+      title = "Amino Acid Enrichment vs CDS",
+      subtitle = nombre_db,
+      x = "Amino Acid",
+      y = "ORF Subtype") +
+    theme_minimal(base_size=15) +
+    theme(
+      axis.text.x = element_text(face = "bold", size = 10),
+      axis.text.y = element_text(face = "bold"),
+      panel.grid = element_blank(),
+      panel.spacing.x = unit(0, "lines"),
+      # borde exterior rectangular alrededor de cada panel
+      panel.border = element_rect(color = "mistyrose4", fill = NA, linewidth = 1.2))
+  
+  print(p3)
+  
+  
+  # ESTADÍSTICOS
+  # miro si la proporción de cada aa en un orfclass es estadísticamente 
+  # diferente de su proporción en los CDS.
+
+  # cuento el total de aa 
+  totales_clase <- composicion_aa |>
+    group_by(orf_class) |>
+    summarise(total_aa_clase = sum(n_total), .groups = "drop")
+  
+  # saco cds aparter
+  datos_cds <- composicion_aa |>
+    filter(orf_class == "CDS") |>
+    select(AA, n_aa_cds = n_total) |>
+    mutate(total_cds = sum(n_aa_cds))
+  
+  # prop.test 
+  resultados_estadisticos <- composicion_aa |>
+    filter(orf_class != "CDS") |>
+    left_join(totales_clase, by = "orf_class") |>
+    left_join(datos_cds, by = "AA") |>
+    rowwise() |>
+    mutate(
+      p_value = prop.test(
+        x = c(n_total, n_aa_cds),
+        n = c(total_aa_clase, total_cds)
+      )$p.value) |>
+    ungroup() |>
+    # la corrección por múltiples comparaciones es FDR
+    mutate(p_adj = p.adjust(p_value, method = "fdr")) |>
+    mutate(significancia = case_when(
+      p_adj < 0.001 ~ "***",
+      p_adj < 0.01  ~ "**",
+      p_adj < 0.05  ~ "*",
+      TRUE          ~ "ns"
+    )) |>
+    # miro también bonferroni que es mucho más estricto 
+    mutate(p_adj_b = p.adjust(p_value, method = "bonferroni")) |> 
+    mutate(significancia_b = case_when(
+      p_adj_b < 0.001 ~ "***",
+      p_adj_b < 0.01  ~ "**",
+      p_adj_b < 0.05  ~ "*",
+      TRUE          ~ "ns"
+    )) |>
+    select(orf_class, AA, n_total, freq, p_value, p_adj, significancia, p_adj_b, significancia_b) |>
+    arrange(orf_class, AA)
+  
+  # Ruta 
+  ruta_guardado <- "C:/Users/paula/UNAV/TFM/Yo/Figuras/estadisticos"
+  
+  estadisticos_aa_cds <- paste0("Resultados_stats_aa_", nombre_db, "_", Sys.Date(), ".xlsx")
+  ruta_completa <- file.path(ruta_guardado, estadisticos_aa_cds)
+  
+  wb <- createWorkbook()
+  
+  # guardo datos
+  addWorksheet(wb, "Composicion_general")
+  writeData(wb, "Composicion_general", composicion_aa)
+  
+  addWorksheet(wb, "Matriz_log2FC")
+  writeData(wb, "Matriz_log2FC", matriz_aa)
+  
+  
+  addWorksheet(wb, "Estadistica_aa_cds")
+  writeData(wb, "Estadistica_aa_cds", resultados_estadisticos)
+  
+  
+  ## estadística por grupos funcional
+  # conteos según grupo
+  totales_grupos <- composicion_aa_f |>
+    group_by(orf_class) |>
+    summarise(n_grupo = sum(n_total), .groups = "drop")
+  
+  # saco cds aparte
+  datos_cds_grupos <- composicion_aa_f |>
+    filter(orf_class == "CDS") |>
+    select(AA, n_aa_cds = n_total) |>
+    mutate(total_cds = sum(n_aa_cds))
+  
+  # prop.test
+  resultados_estadisticos_grupos <- composicion_aa_f |>
+    filter(orf_class != "CDS") |>
+    left_join(totales_grupos, by = "orf_class") |>
+    left_join(datos_cds_grupos, by = "AA") |>
+    rowwise() |>
+    mutate(
+      p_value = prop.test(
+        x = c(n_total, n_aa_cds),
+        n = c(n_grupo, total_cds)
+      )$p.value
+    ) |>
+    ungroup() |>
+    # Corrección FDR
+    mutate(p_adj = p.adjust(p_value, method = "fdr")) |>
+    mutate(significancia = case_when(
+      p_adj < 0.001 ~ "****",
+      p_adj < 0.01  ~ "***",
+      p_adj < 0.05  ~ "*",
+      TRUE          ~ "ns"
+    ))
+  
+  saveWorkbook(wb, ruta_completa, overwrite = TRUE)
+  
+  
+  ## ANEXO
+  borde_vertical <- fp_border(color = "black", width = 0.5)
+  
+  ft_prop_aa <- resultados_estadisticos |>
+    select(orf_class, AA, n_total, freq, p_value, p_adj, significancia) |> 
+    dplyr::rename(
+      `Clase de ORF` = orf_class,
+      `Aminoácido` = AA,
+      `Conteo (n)` = n_total,
+      `Frecuencia (%)` = freq,
+      `Valor p` = p_value,
+      `Valor p (FDR)` = p_adj,
+      `Sig. (FDR)` = significancia
+    ) |>
+    flextable() |>
+    set_caption(caption = "Test de proporciones de la composición de aminoácidos
+                individuales por clase de ORF frente a las secuencias CDS.
+                (Corrección FDR)") |>
+    colformat_double(j = c("Frecuencia (%)"), digits = 4) |>
+    colformat_double(j = c("Valor p", "Valor p (FDR)"), digits = 4) |>
+    theme_vanilla() |>
+    font(fontname = "Times New Roman", part = "all") |>
+    fontsize(size = 9, part = "all") |>
+    border_inner_v(border = borde_vertical) |>
+    border_outer(border = borde_vertical) |>
+    autofit()  
+
+  ft_prop_grupos <- resultados_estadisticos_grupos |>
+    select(orf_class, AA, n_total, freq, p_value, p_adj, significancia) |> 
+    dplyr::rename(
+      `Clase de ORF` = orf_class,
+      `Grupo Funcional` = AA, 
+      `Conteo (n)` = n_total,
+      `Frecuencia (%)` = freq,
+      `Valor p` = p_value,
+      `Valor p (FDR)` = p_adj,
+      `Sig. (FDR)` = significancia
+    ) |>
+    flextable() |>
+    set_caption(caption = "Test de proporciones de la composición por grupos 
+                funcionales de aminoácidos por clase de ORF frente a las secuencias CDS.
+                (Corrección FDR)") |>
+    colformat_double(j = c("Frecuencia (%)"), digits = 4) |>
+    colformat_double(j = c("Valor p", "Valor p (FDR)"), digits = 4) |>
+    theme_vanilla() |>
+    font(fontname = "Times New Roman", part = "all") |>
+    fontsize(size = 9, part = "all") |>
+    border_inner_v(border = borde_vertical) |>
+    border_outer(border = borde_vertical) |>
+    autofit()
+  
+  doc <- read_docx() |> 
+    body_add_par("Anexo: Análisis Estadístico de Composición de Aminoácidos", style = "heading 1") |>
+    
+    body_add_par("1. Composición de Aminoácidos Individuales", style = "heading 2") |>
+    body_add_par("Evaluación de las diferencias significativas en la frecuencia 
+                 relativa de cada aminoácido entre los subtipos de ORF no canónicos
+                 y las secuencias codificantes canónicas (CDS). Se empleó un test 
+                 de proporciones independientes seguido de una corrección de 
+                 comparaciones múltiples mediante FDR.", style = "Normal") |>
+    body_add_par("", style = "Normal") |> 
+    body_add_flextable(ft_prop_aa) |>
+    
+    body_add_break() |>
+    
+    body_add_par("2. Composición por Grupos Funcionales", style = "heading 2") |>
+    body_add_par("Análisis del enriquecimiento o empobrecimiento estadístico al 
+                 agrupar los residuos según sus propiedades fisicoquímicas. Las 
+                 proporciones globales de cada grupo funcional en los ORF no c
+                 anónicos fueron contrastadas frente a las observadas en las 
+                 secuencias CDS.", style = "Normal") |>
+    body_add_par("", style = "Normal") |> 
+    body_add_flextable(ft_prop_grupos)
+  
+  print(doc, target = "Anexo_Estadistica_Aminoacidos_heatmap.docx")
+  
+}
+
+grafico_ieatlas <- plot_aa(ieatlas, "ieatlas")
+grafico_two_evidences <- plot_aa(ieatlas_two_evidences, "ieatlas two evidences")
+
