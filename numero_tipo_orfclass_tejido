@@ -1,0 +1,214 @@
+# figura 2C: número tipo orf class  con tejido sano / tejido tumoral o ambas
+
+# importación paleta colores y librería
+source("Yo/Figuras/library.R")
+source("Yo/Figuras/mipaleta_orfs.R")
+source("Yo/Figuras/Setup_figuras_tissue.R")
+
+
+plot_orf_counts_tissue <- function(datos, nombre_db) {
+  
+  datos_finales <- datos |> 
+    filter(orf_class %in% niveles_permitidos) |> 
+    mutate(orf_class = case_when(
+      orf_class == "lncRNA-ORF" ~ "lncORF",
+      orf_class == "ncRNA_from_protein_coding_gene" ~ "ncORF",
+      TRUE ~ as.character(orf_class))) 
+  
+  tejidos_plot <- datos_finales |> 
+    left_join(epitope_class, by = 'epitope') |>
+    group_by(orf_id) |>
+    mutate(
+      new_classification = case_when(
+        "Both" %in% classification ~ 'Both', 
+        "Cancer" %in% classification & "Normal" %in% classification ~ 'Both',
+        "Testis" %in% classification & "Normal" %in% classification ~ 'Both',
+        # testis es inmunoprivilegiado
+        "Cancer" %in% classification & "Testis" %in% classification ~ 'Cancer', 
+        all(classification %in% c('Testis', 'Cancer')) ~ 'Cancer', 
+        all(classification == 'Normal') ~ 'Normal',
+        TRUE ~ "Unknown")) |>
+    ungroup()
+  
+  # orden que quiero de los grupos en el gráfico
+  orden_tissue = c("Normal","Cancer","Both")
+  
+  # cuento cuántos orfclass hay en cada tejido
+  p1 <- tejidos_plot |>
+    # hago distinct para que no me infle los datos porque con el left join se me 
+    # duplicó tantas en tantas filas como epitopos
+    distinct(orf_id, orf_class, new_classification) |>
+    count(new_classification, orf_class) |> 
+    mutate(orf_class = factor(orf_class, levels = orden_orf)) |> 
+    mutate(new_classification = factor(new_classification, levels = orden_tissue))
+  
+  plot_1F <- ggplot(p1, aes(x = new_classification, y = n, fill = orf_class, pattern = new_classification)) +
+    geom_col_pattern(aes(pattern = new_classification),
+                     position = "dodge", 
+                     width = 0.9, 
+                     color="black", 
+                     linewidth=0.6, 
+                     pattern_color = "brown"
+                     ) +
+    geom_text(aes(label = n), 
+              position = position_dodge(width = 0.9),
+              vjust = -0.5,       
+              size = 4.7,
+              hjust = 0.5, # q se separe un poco de la barra
+              angle = 0) + # texto horizontal
+    facet_wrap(~orf_class, nrow = 1, scales = "free_x") + # un graf para cada orfclass 
+    # y escala libre para ver el titulo del tissue
+    scale_x_discrete(drop = TRUE) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) + # con y sin  trans = "log10"
+    scale_fill_manual(values = colores_orfs) +
+    scale_pattern_manual(values = c(
+      "Normal"  = "none",      
+      "Cancer"    = "stripe",  
+      "Both"  = "circle")) + 
+    guides(pattern = "none") + # no quiero leyenda de tissue
+    labs(subtitle = nombre_db, x = "ORF subtype", y = "Number") +
+    theme_minimal(base_size = 15) +
+    theme(axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 1),
+          axis.title.x = element_text(hjust = 0.5),
+          panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.8),
+          legend.position = "right",
+          plot.margin = margin(t = 6, r = 13, b = 9, l = 6, unit = "pt"),
+          strip.text = element_blank())
+  
+  print(plot_1F)
+  
+  ## ESTADÍSTICOS
+  # Ruta 
+  ruta_guardado <- "C:/Users/paula/UNAV/TFM/Yo/Figuras/estadisticos"
+  
+  tabla_datos_figura_1F <- paste0("tabla_datos_figura_1F_", nombre_db, "_", Sys.Date(), ".xlsx")
+  ruta_completa <- file.path(ruta_guardado, tabla_datos_figura_1F)
+  
+  wb <- createWorkbook()
+  
+  # adjunto en el excel la clasificación otorgada a los tejidos
+  clasificacion_tissue <- tejidos_plot |> 
+    select(original_orf_id, orf_class, gene_name, classification, new_classification)
+  
+  addWorksheet(wb, "clasificacion_tissue")
+  writeData(wb, "clasificacion_tissue", clasificacion_tissue)
+  
+  # incluyo también los datos que se ven en el plot
+  addWorksheet(wb, "datos_plot")
+  writeData(wb, "datos_plot", p1)
+  
+  # estudio diferencias de datos tipo categóricos
+  # cambio formato datos para aplicar chi2 para ver pvalor global
+  tabla_contingencia <- p1 |>
+    pivot_wider(
+      names_from = orf_class, 
+      values_from = n,
+      values_fill = NA
+    )
+  
+  # conservo solo números
+  matriz_chi <- as.matrix(tabla_contingencia |> 
+                            select(-new_classification))
+  # devuelvo el nombre
+  rownames(matriz_chi) <- tabla_contingencia$new_classification
+  
+  testchi <- chisq.test(matriz_chi) 
+  
+  # cojo los resultados y los meto en un df
+  resultados_testchi <- data.frame(
+    statistic = as.numeric(testchi$statistic),
+    df = as.numeric(testchi$parameter),
+    p_value = testchi$p.value
+  )
+  
+  addWorksheet(wb, "pvalor_global")
+  writeData(wb, "pvalor_global", resultados_testchi)
+  
+  # como hay diferencias voy a ver entre qué grupos: comparaciones por pares
+  # Both y normal
+  test_Both_Normal <- chisq.test(matriz_chi[c("Both", "Normal"), ])
+  
+  # Both y cancer
+  test_Both_Cancer <- chisq.test(matriz_chi[c("Both", "Cancer"), ])
+  
+  # Normal y cancer
+  test_Normal_Cancer <- chisq.test(matriz_chi[c("Normal", "Cancer"), ])
+
+  # tabla con los pvalores
+  resultados_pares <- data.frame(
+    comparacion = c(
+      "Both vs Normal",
+      "Both vs Cancer",
+      "Normal vs Cancer"
+    ),
+    p_value = c(
+      test_Both_Normal$p.value,
+      test_Both_Cancer$p.value,
+      test_Normal_Cancer$p.value
+    )
+  ) |> 
+    mutate(p_value_bonferroni = p.adjust(p_value, method = "bonferroni"))
+  
+  addWorksheet(wb, "resultados_pares")
+  writeData(wb, "resultados_pares", resultados_pares)
+  
+  # en todos los grupos hay diferencias. quiero ver en que orfclass
+  total_cancer <- sum(p1$n[p1$new_classification == "Cancer"])
+  total_normal <- sum(p1$n[p1$new_classification == "Normal"])
+  total_both   <- sum(p1$n[p1$new_classification == "Both"])
+  
+  # comparaciones por pares pero ahora para cada orf_class
+  resultados_orf_pares <- p1 |>
+    group_by(orf_class) |>
+    summarise(
+      conteo_cancer = sum(n[new_classification == "Cancer"]),
+      conteo_normal = sum(n[new_classification == "Normal"]),
+      conteo_both   = sum(n[new_classification == "Both"]),
+      
+      # cancer vs normal
+      p_value_cancer_normal = prop.test(
+        x = c(conteo_cancer, conteo_normal), 
+        n = c(total_cancer, total_normal)
+      )$p.value,
+      
+      # normal vs both
+      p_value_normal_both = prop.test(
+        x = c(conteo_normal, conteo_both), 
+        n = c(total_normal, total_both)
+      )$p.value,
+      
+      # both vs cancer
+      p_value_both_cancer = prop.test(
+        x = c(conteo_both, conteo_cancer), 
+        n = c(total_both, total_cancer)
+      )$p.value
+    ) |>
+    # quito conteos
+    select(-conteo_cancer, -conteo_normal, -conteo_both) |>
+    # formato largo
+    pivot_longer(
+      cols = starts_with("p_value_"),
+      names_to = "comparacion",
+      values_to = "p_value"
+    ) |>
+    mutate(
+      comparacion = case_when(
+        comparacion == "p_value_cancer_normal" ~ "Cancer vs Normal",
+        comparacion == "p_value_normal_both"   ~ "Normal vs Both",
+        comparacion == "p_value_both_cancer"   ~ "Both vs Cancer"
+      ),
+      # bonferroni
+      p_value_bonferroni = p.adjust(p_value, method = "bonferroni")
+    )
+  
+  addWorksheet(wb, "resultados_orf_pares")
+  writeData(wb, "resultados_orf_pares", resultados_orf_pares)
+  
+  # Guardar
+  saveWorkbook(wb, ruta_completa, overwrite = TRUE)
+  
+  }
+
+grafico_ieatlas <- plot_orf_counts_tissue(ieatlas, "ieatlas")
+grafico_two_evidences <- plot_orf_counts_tissue(ieatlas_two_evidences, "ieatlas_two_evidences")
+
