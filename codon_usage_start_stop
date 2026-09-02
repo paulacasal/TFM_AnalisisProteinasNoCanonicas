@@ -1,0 +1,433 @@
+# figura 3: codon usage: first aa, start codon, stop codon
+
+# importación paleta colores y librería
+source("Yo/Figuras/library.R")
+source("Yo/Figuras/mipaleta_orfs.R")
+source("Yo/Figuras/Setup_figuras.R")
+
+plot_firstaa_start_stop <- function(datos, nombre_db) {
+  
+  datos_finales <- datos |> 
+    full_join(uniprot_cds, by = c("gene_name", "cdna", "amino_acid_sequence")) |> 
+    mutate(orf_class = if_else(!is.na(uniprot_id), "CDS", orf_class)) 
+  
+  datos_excluir <- c("CDS", "multiclass", "wrapping", "miscellaneous", "unknown ORF", 
+                     "ncRNA", "protein_coding_CDS_not_defined")
+  
+  col_noCDS <- datos_finales |> 
+    filter(!orf_class %in% datos_excluir,
+           !is.na(orf_class)) |>  
+    mutate(orf_class = "no CDS")
+  
+  resto_col <- datos_finales |> 
+    filter(orf_class %in% niveles_permitidos) |> 
+    mutate(orf_class = case_when(
+      orf_class == "lncRNA-ORF" ~ "lncORF",
+      orf_class == "ncRNA_from_protein_coding_gene" ~ "ncORF",
+      TRUE ~ as.character(orf_class))) |> 
+    group_by(orf_class) 
+  
+  datos_plot <- bind_rows(col_noCDS, resto_col)
+  
+  stop_codon <- datos_plot |> 
+    # cdna para cds porque no tiene orfseq
+    mutate(variant = str_sub(cdna, -3)) |> 
+    # stop codons
+    filter(variant %in% c("TAA", "TAG", "TGA")) |> 
+    # porcentajes por clase
+    group_by(orf_class, variant) |> 
+    summarise(n = n(), .groups = "drop_last") |>
+    group_by(orf_class) |> 
+    mutate(percentage = (n / sum(n))) |> 
+    ungroup() |> 
+    # ordeno igual que en los anteriores gráficos
+    mutate(orf_class = factor(orf_class, levels = orden_orf)) |> 
+    filter(!is.na(orf_class))
+  
+  # su gráfico
+  stop_graf <- ggplot(stop_codon, aes(x = variant, y = percentage, fill = orf_class)) +
+    geom_col(position = "dodge", width = 0.8, color = "black", linewidth = 0.6) +
+    # porcentaje en el eje Y
+    scale_y_continuous(labels = percent, 
+                       expand = expansion(mult = c(0, 0.2))) + 
+    labs(x = "Stop Codon", 
+         y = "Usage Frequency (%)") +
+    theme_minimal(base_size = 12) +
+    theme(
+      axis.title.x = element_text(hjust = 0.5, margin = margin(t = 10)),
+      panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.8),
+      axis.line = element_line(colour = "black", linewidth = 0.5),
+      panel.grid.major.x = element_blank())
+  
+  
+  first_aa <-  datos_plot |> 
+    # Extraigo el primer aminoácido
+    mutate(variant = str_sub(amino_acid_sequence, 1, 1)) |>
+    # los aa permitidos en IEAtlas como iniciadores
+    filter(variant %in% c("M", "L", "V")) |> 
+    filter(!is.na(orf_class), !is.na(variant)) |> 
+    # Agrupo para sacar porcentajes
+    group_by(orf_class, variant) |> 
+    summarise(n = n(), .groups = "drop_last") |>
+    group_by(orf_class) |> 
+    mutate(percentage = n / sum(n)) |> 
+    ungroup() |> 
+    mutate(orf_class = factor(orf_class, levels = orden_orf)) |> 
+    filter(!is.na(orf_class))
+  
+  # su gráfico
+  firstaa_graf <- ggplot(first_aa, aes(x = variant, y = percentage, fill = orf_class)) +
+    geom_col(position = "dodge", width = 0.8, color = "black", linewidth = 0.6) +
+    # Formato de porcentaje en el eje Y
+    scale_y_continuous(labels = percent, 
+                       expand = expansion(mult = c(0, 0.2))) + 
+    #scale_fill_manual(values = colores_orfs, drop = FALSE) + 
+    labs(x = "First Amino Acid", 
+         y = "Usage Frequency (%)") +
+    theme_minimal(base_size = 12) +
+    theme(
+      axis.title.x = element_text(hjust = 0.5, margin = margin(t = 10)),
+      panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.8),
+      axis.line = element_line(colour = "black", linewidth = 0.5),
+      panel.grid.major.x = element_blank())
+  
+  
+  start_codon <- datos_plot |>
+    mutate(variant = str_sub(if_else(orf_class == "CDS", cdna, orf_seq), 1, 3)) |>  
+    # los codones que producen M, L, V
+    filter(variant %in% c("ATG", "CTG", "GTG", "TTG")) |>
+    filter(!is.na(variant)) |> 
+    group_by(orf_class, variant) |> 
+    summarise(n = n(), .groups = "drop_last") |> 
+    group_by(orf_class) |> 
+    mutate(percentage = n / sum(n)) |> 
+    ungroup() |> 
+    mutate(orf_class = factor(orf_class, levels = orden_orf)) |> 
+    filter(!is.na(orf_class))
+  
+  # su gráfico
+  start_graf <- ggplot(start_codon, aes(x = variant, y = percentage, fill = orf_class)) +
+    geom_col(position = "dodge", width = 0.8, color = "black", linewidth = 0.6) +
+    # Formato de porcentaje en el eje Y
+    scale_y_continuous(labels = percent, 
+                       expand = expansion(mult = c(0, 0.2))) + 
+    #scale_fill_manual(values = colores_orfs,drop  =FALSE) + 
+    labs(x = "Start Codon", 
+         y = "Usage Frequency (%)") +
+    theme_minimal(base_size = 12) +
+    theme(
+      axis.title.x = element_text(hjust = 0.5, margin = margin(t = 10)),
+      panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.8),
+      axis.line = element_line(colour = "black", linewidth = 0.5),
+      panel.grid.major.x = element_blank())
+  
+  # leyenda aparte para que solo aparezca una vez
+  leyenda_solo <- ggplot(first_aa, aes(x = variant, y = percentage, fill = orf_class)) +
+    geom_col() +
+    scale_fill_manual(
+      values = colores_orfs, 
+      drop = FALSE, 
+      name = "ORF Class", 
+      limits = orden_orf,
+      guide = guide_legend(nrow = 1, title.position = "top")) +
+    theme_minimal() +
+    theme(
+      legend.position = "bottom",
+      legend.direction = "horizontal",
+      legend.justification = "left",
+      legend.title = element_text(size = 10, face = "bold"),
+      legend.text = element_text(size = 9),
+      legend.key.size = unit(0.4, "cm"))
+  
+  
+  # cojo la leyenda aparte para meterla con patchwork
+  leyenda_extraida <- get_legend(leyenda_solo)
+  
+  # quito la leyenda de ellos para que no me de error
+  firstaa_graf <- firstaa_graf + theme(legend.position = "none")
+  stop_graf  <- stop_graf + theme(legend.position = "none")
+  start_graf  <- start_graf + theme(legend.position = "none")
+  
+  figura_final <- (firstaa_graf / start_graf / stop_graf / leyenda_extraida) + 
+    plot_layout(
+      guides = "collect", # todas las leyendas en una sola
+      heights = c(1.4, 2.5, 1.4, 0.5)) +
+    plot_annotation(title = nombre_db,
+                    theme = theme(
+                      plot.title = element_text(
+                        hjust = 0.5))) &
+    scale_fill_manual(values = colores_orfs, drop=FALSE, name = "ORF Class", limits = orden_orf) &
+    theme(plot.margin = margin(t = 10, r = 10, b = 13, l = 10), 
+          legend.direction = "horizontal")
+  
+  
+  ## ESTADÍSTICOS
+  # Ruta 
+  ruta_guardado <- "C:/Users/paula/UNAV/TFM/Yo/Figuras/estadisticos"
+  
+  tabla_datos_figura_2A <- paste0("tabla_datos_figura_2A_", nombre_db, "_", Sys.Date(), ".xlsx")
+  ruta_completa <- file.path(ruta_guardado, tabla_datos_figura_2A)
+  
+  wb <- createWorkbook()
+  
+  ### estadísticos stop codon
+  # datos usados
+  addWorksheet(wb, "stop_codon")
+  writeData(wb, "stop_codon", stop_codon)
+  
+  # diferencias en stop: datos categóricos asique chi2
+  tabla_contingencia_stop <- stop_codon |> 
+    pivot_wider(
+      id_cols = variant,
+      names_from = orf_class, 
+      values_from = n, 
+      values_fill = 0
+    )
+  
+  # quito nombres
+  matriz_stop_chi <- as.matrix(tabla_contingencia_stop |> 
+                                 select(-variant))
+  # los devuelvo así
+  rownames(matriz_stop_chi) <- tabla_contingencia_stop$variant
+  
+  # pvalor global: hay valor menor a 5
+  testchi_stop <- chisq.test(matriz_stop_chi)
+  
+  resultados_testchi_stop <- data.frame(
+    statistic = as.numeric(testchi_stop$statistic),
+    df        = as.numeric(testchi_stop$parameter),
+    p_value   = testchi_stop$p.value
+  )
+  
+  addWorksheet(wb, "pvalor_global_stop")
+  writeData(wb, "pvalor_global_stop", resultados_testchi_stop)
+  
+  
+  # los totales de cada stop codon
+  total_taa <- sum(stop_codon$n[stop_codon$variant == "TAA"])
+  total_tag <- sum(stop_codon$n[stop_codon$variant == "TAG"])
+  total_tga <- sum(stop_codon$n[stop_codon$variant == "TGA"])
+  
+  
+  # comparaciones por pares de stop codons dentro de cada orf_class
+  resultados_stop_orf <- stop_codon |> 
+    group_by(orf_class) |> 
+    summarise(
+      # conteos de cada stop codon 
+      conteo_taa = sum(n[variant == "TAA"]),
+      conteo_tag = sum(n[variant == "TAG"]),
+      conteo_tga = sum(n[variant == "TGA"]),
+      
+      # TAA vs TAG
+      p_value_taa_tag = prop.test(
+        x = c(conteo_taa, conteo_tag), 
+        n = c(total_taa, total_tag)
+      )$p.value,
+      
+      # TAA vs TGA
+      p_value_taa_tga = prop.test(
+        x = c(conteo_taa, conteo_tga), 
+        n = c(total_taa, total_tga)
+      )$p.value,
+      
+      # TAG vs TGA
+      p_value_tag_tga = prop.test(
+        x = c(conteo_tag, conteo_tga), 
+        n = c(total_tag, total_tga)
+      )$p.value
+    ) |> 
+    # quito columnas conteo
+    select(-conteo_taa, -conteo_tag, -conteo_tga) |> 
+    # tabla larga
+    pivot_longer(
+      cols = starts_with("p_value_"),
+      names_to = "comparacion",
+      values_to = "p_value"
+    ) |> 
+    mutate(
+      comparacion = case_when(
+        comparacion == "p_value_taa_tag" ~ "TAA vs TAG",
+        comparacion == "p_value_taa_tga" ~ "TAA vs TGA",
+        comparacion == "p_value_tag_tga" ~ "TAG vs TGA"
+      ),
+      # corrección de bonferroni 
+      p_value_bonferroni = p.adjust(p_value, method = "bonferroni")
+    )
+  
+  addWorksheet(wb, "stop_orf_bonferroni")
+  writeData(wb, "stop_orf_bonferroni", resultados_stop_orf)
+  
+  ### estadísticos primer aa
+  # datos usados
+  
+  addWorksheet(wb, "first_aa")
+  writeData(wb, "first_aa", first_aa)
+  
+  # diferencias en firstaa: datos categóricos asique chi2
+  tabla_contingencia_firstaa <- first_aa |> 
+    pivot_wider(
+      id_cols = variant,
+      names_from = orf_class, 
+      values_from = n, 
+      values_fill = 0
+    )
+  
+  # quito nombres
+  matriz_firstaa_chi <- as.matrix(tabla_contingencia_firstaa |> 
+                                 select(-variant))
+  # los devuelvo así
+  rownames(matriz_firstaa_chi) <- tabla_contingencia_firstaa$variant
+  
+  # pvalor global
+  testchi_firstaa <- chisq.test(matriz_firstaa_chi)
+  
+  resultados_testchi_firstaa <- data.frame(
+    statistic = as.numeric(testchi_firstaa$statistic),
+    df        = as.numeric(testchi_firstaa$parameter),
+    p_value   = testchi_firstaa$p.value
+  )
+  
+  addWorksheet(wb, "pvalor_global_firstaa")
+  writeData(wb, "pvalor_global_firstaa", resultados_testchi_firstaa)
+  
+  
+  # los totales de cada stop codon
+  total_M <- sum(first_aa$n[first_aa$variant == "M"])
+  total_L <- sum(first_aa$n[first_aa$variant == "L"])
+  total_V <- sum(first_aa$n[first_aa$variant == "V"])
+  
+  
+  # comparaciones por pares de first aa dentro de cada orf_class
+  resultados_firstaa_orf <- first_aa |> 
+    group_by(orf_class) |> 
+    summarise(
+      # conteos de cada first aa
+      conteo_L = sum(n[variant == "M"]),
+      conteo_M = sum(n[variant == "L"]),
+      conteo_V = sum(n[variant == "V"]),
+      
+      # M vs L. Tengo que inlcuir la función trycatch ya que, cds solo se ve en M
+      p_value_M_L = tryCatch(
+        prop.test(x = c(conteo_M, conteo_L), n = c(total_M, total_L))$p.value,
+        error = function(e) NA_real_
+      ),
+      
+      # M vs V
+      p_value_M_V = tryCatch(
+        prop.test(x = c(conteo_M, conteo_V), n = c(total_M, total_V))$p.value,
+        error = function(e) NA_real_
+      ),
+      
+      # L vs V
+      p_value_L_V = tryCatch(
+        prop.test(x = c(conteo_L, conteo_V), n = c(total_L, total_V))$p.value,
+        error = function(e) NA_real_
+      )) |> 
+    # quito columnas conteo
+    select(-conteo_M, -conteo_L, -conteo_V) |> 
+    # tabla larga
+    pivot_longer(
+      cols = starts_with("p_value_"),
+      names_to = "comparacion",
+      values_to = "p_value"
+    ) |> 
+    mutate(
+      comparacion = case_when(
+        comparacion == "p_value_M_L" ~ "M vs L",
+        comparacion == "p_value_M_V" ~ "M vs V",
+        comparacion == "p_value_L_V" ~ "L vs V"
+      ),
+      # corrección de bonferroni 
+      p_value_bonferroni = p.adjust(p_value, method = "bonferroni")
+    )
+  
+  addWorksheet(wb, "firstaa_orf_bonferroni")
+  writeData(wb, "firstaa_orf_bonferroni", resultados_firstaa_orf)
+  
+  
+  ### estadísticos primer codon
+  # datos usados
+  
+  addWorksheet(wb, "start_codon")
+  writeData(wb, "start_codon", start_codon)
+  
+  # diferencias en start_codon: datos categóricos asique chi2
+  tabla_contingencia_start <- start_codon |> 
+    pivot_wider(
+      id_cols = variant,
+      names_from = orf_class, 
+      values_from = n, 
+      values_fill = 0
+    )
+  
+  # quito nombres
+  matriz_start_chi <- as.matrix(tabla_contingencia_start |> 
+                                    select(-variant))
+  # los devuelvo así
+  rownames(matriz_start_chi) <- tabla_contingencia_start$variant
+  
+  # pvalor global
+  testchi_start <- chisq.test(matriz_start_chi)
+  
+  resultados_testchi_start <- data.frame(
+    statistic = as.numeric(testchi_start$statistic),
+    df        = as.numeric(testchi_start$parameter),
+    p_value   = testchi_start$p.value
+  )
+  
+  addWorksheet(wb, "pvalor_global_start")
+  writeData(wb, "pvalor_global_start", resultados_testchi_start)
+  
+  
+  # los totales de cada stop codon: logica diferente porque son mas de 3, 
+  # no voy a hacer las combinaciones a mano
+  totales_variant_start <- start_codon |> 
+    group_by(variant) |> 
+    summarise(total_global = sum(n, na.rm = TRUE))
+  
+  
+  # comparaciones por pares de start codons dentro de cada orf_class
+  resultados_start_orf <- start_codon |> 
+    group_by(orf_class, variant) |> 
+    summarise(conteo = sum(n, na.rm = TRUE), .groups = "drop") |> 
+    # uno los totales qu ehe calculado arriba
+    left_join(totales_variant_start, by = "variant") |> 
+    group_by(orf_class) |> 
+    # uso reframe para que me haga todas las combis
+    reframe({
+      tryCatch({
+        # conteos por orfclass
+        x_vec <- setNames(conteo, variant)
+        # totales globales de cada variante 
+        n_vec <- setNames(total_global, variant)
+        
+        # test por pares
+        # no pongo bonferroni para conservar el pvalor original, lo hago después
+        pairwise.prop.test(x = x_vec, n = n_vec, p.adjust.method = "none") |> 
+          tidy()
+      }, error = function(e) NULL)
+    }) |> 
+    # corrección bonferroni
+    mutate(
+      comparacion = paste(group2, "vs", group1)
+    ) |> 
+    group_by(orf_class) |> 
+    mutate(
+      p_value_bonferroni = p.adjust(p.value, method = "bonferroni")
+    ) |> 
+    select(orf_class, comparacion, p_value = p.value, p_value_bonferroni)
+  
+  addWorksheet(wb, "start_orf_bonferroni")
+  writeData(wb, "start_orf_bonferroni", resultados_start_orf)
+  
+  # Guardar
+  saveWorkbook(wb, ruta_completa, overwrite = TRUE)
+  
+  return(figura_final)
+}
+
+grafico_ieatlas <- plot_firstaa_start_stop(ieatlas, "ieatlas")
+grafico_ieatlas_two_evidences <- plot_firstaa_start_stop(ieatlas_two_evidences, "ieatlas_two_evidences")
+
+print(grafico_ieatlas)
+print(grafico_ieatlas_two_evidences)
