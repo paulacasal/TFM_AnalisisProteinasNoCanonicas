@@ -1,0 +1,257 @@
+# figura 4AB: heatmap y pheatmap codones
+
+# importación paleta colores y librería
+source("Yo/Figuras/library.R")
+source("Yo/Figuras/mipaleta_orfs.R")
+source("Yo/Figuras/Setup_figuras.R")
+
+plots_codones <- function(datos, nombre_db) {
+  datos_finales <- datos |> 
+    full_join(uniprot_cds, by = c("gene_name", "cdna", "amino_acid_sequence")) |> 
+    mutate(orf_class = if_else(!is.na(uniprot_id), "CDS", orf_class)) 
+  
+  datos_excluir <- c("CDS", "multiclass", "wrapping", "miscellaneous", "unknown ORF", 
+                     "ncRNA", "protein_coding_CDS_not_defined")
+  
+  col_noCDS <- datos_finales |> 
+    filter(!orf_class %in% datos_excluir,
+           !is.na(orf_class)) |>  
+    mutate(orf_class = "no CDS")
+  
+  resto_col <- datos_finales |> 
+    filter(orf_class %in% niveles_permitidos) |> 
+    mutate(orf_class = case_when(
+      orf_class == "lncRNA-ORF" ~ "lncORF",
+      orf_class == "ncRNA_from_protein_coding_gene" ~ "ncORF",
+      TRUE ~ as.character(orf_class))) |> 
+    group_by(orf_class) 
+  
+  datos_plot <- bind_rows(col_noCDS, resto_col)
+  
+  stop_codons <- c("TAA", "TAG", "TGA")
+  
+  codon_usage_data <- datos_plot |>
+    mutate(seq_codon_usage = if_else(orf_class == "CDS", cdna, orf_seq))|>
+    # que sea múltiplo de 3
+    mutate(codon = str_extract_all(seq_codon_usage, ".{3}")) |>
+    unnest(codon) |>
+    # quito na y stop codons ya que en no CDS supone un porcentaje importante
+    # de la secuencia porque son pequeños y al ser ricos en AT manipula el resultado
+    filter(
+      !is.na(codon), 
+      !codon %in% stop_codons,
+      # por precaución
+      !str_detect(codon, "N")) |> 
+    # contar frecuencias por gen para evitar que un gen largo domine
+    group_by(orf_class, codon) |>
+    summarise(n_total = n(), .groups = "drop") |>
+    # calculo porcentajes
+    group_by(orf_class) |>
+    mutate(freq = (n_total / sum(n_total)) * 100) |> 
+    ungroup() |>
+    # reordeno para plot
+    mutate(orf_class = factor(orf_class, levels =orden_orf))
+  
+  # heatmap de la frecuencia de cada codon, sin normalizar
+  # plot 4A
+  p2 <- ggplot(codon_usage_data, aes(x = codon, y = orf_class, fill = freq)) +
+    geom_tile(color = NA, linewidth = 0.1) +
+    scale_fill_gradientn(
+      colors = c("#4575b4", "pink2", "#a50026"),
+      name = "Frecuency") +
+    # que sean cuadrados
+    coord_fixed(ratio = 1) +
+    labs(
+      title = "Codon Usage Enrichment Heatmap",
+      subtitle = nombre_db,
+      x = "ORF subtype",
+      y = "Codon") +
+    theme_minimal(base_size = 14) +
+    theme(
+      plot.margin = margin(t = 5, r = 5, b = 5, l = 5, unit = "pt"),
+      axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 7),
+      axis.text.y = element_text(size = 10, family = "mono"),
+      panel.grid = element_blank(),
+      panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.8),
+      legend.text = element_text(size = 8),
+      legend.title = element_text(size = 9),
+      legend.position = "right")
+  
+  print(p2)
+  
+  # plot de la diferencia de cada grupo frente a CDS
+  # la tabla a formato ancho para calcular la diferencia con CDS
+  matriz_codones <- codon_usage_data |>
+    select(orf_class, codon, freq) |>
+    pivot_wider(names_from = orf_class, values_from = freq, values_fill = 0) 
+  
+  # Log2 Fold Change respecto a CDS
+  # sumo valor pequeño para evitar dividir por cero
+  matriz_diff <- matriz_codones |>
+    mutate(across(-codon, ~ log2((. + 0.001) / (CDS + 0.001)))) |>
+    select(-CDS, -codon) |> # Quitamos CDS (es 0), codon (va a los rownames) 
+    as.matrix()
+  
+  rownames(matriz_diff) <- matriz_codones$codon
+  # reordeno para que aparezcan bien, sin CDS 
+  matriz_diff <- matriz_diff[, orden_orf[orden_orf != "CDS"]]
+  
+  # nuevo límite para observar mejor difs
+  matriz_diff_clipped <- pmax(pmin(matriz_diff, 1), -1)
+  
+  # breaks no lineales concentrados cerca de 0
+  # estrecho usando exponente
+  raw_seq <- seq(-1, 1, length.out = 101)
+  my_breaks <- sign(raw_seq) * (abs(raw_seq)^2) 
+  
+  # paleta de colores
+  my_colors <- colorRampPalette(c("#313695", "white", "#a50026"))(100)
+  hc_cols <- hclust(dist(t(matriz_diff_clipped), method = "euclidean"))
+  
+  # invertir el orden del dendrograma
+  dend_cols_inv <- rev(as.dendrogram(hc_cols))
+  #hc_cols_inv <- as.hclust(dend_cols_inv)
+  
+  orden_labels <- labels(dend_cols_inv)
+  n <- length(orden_labels)
+  orden_nuevo <- c(rev(orden_labels[1:(n-2)]), rev(orden_labels[(n-1):n]))
+
+  # quiero rotar el orden para que se vean al final lncorf y dorf que son los
+  # más parecidos a cds
+  # tengo que forzar librería porque sino no funciona rotate, se queda enmascarada de otra
+  dend_cols_rot <- dendextend::rotate(dend_cols_inv, order = orden_nuevo)
+  hc_cols_inv <- as.hclust(dend_cols_rot)
+  
+  # plot 4B: heatmap
+  p3 <- pheatmap(matriz_diff_clipped, 
+                 cluster_cols = hc_cols_inv,
+                 color = my_colors,
+                 breaks = my_breaks,
+                 main = " ",
+                 fontsize_row = 6, 
+                 cellheight = 6,
+                 cellwidth = 15,
+                 treeheight_row = 10,
+                 silent = TRUE)
+  
+  # bloque de grid para título, subtítulo
+  grid.newpage()
+  pushViewport(viewport(y = 0.45, height = 0.85)) 
+  grid.draw(p3$gtable)
+  popViewport()
+  
+  grid.text("Codon Usage Difference vs CDS", 
+            x = 0.5, y = 0.95, 
+            gp = gpar(fontsize = 16, fontface = "bold"))
+  
+  grid.text(nombre_db, 
+            x = 0.5, y = 0.92, 
+            gp = gpar(fontsize = 11, col = "grey30"))
+  
+  ### ESTADÍSTICA
+  # Ruta 
+  ruta_guardado <- "C:/Users/paula/UNAV/TFM/Yo/Figuras/estadisticos"
+  
+  tabla_datos_figura_2BC <- paste0("tabla_datos_figura_2BC_", nombre_db, "_", Sys.Date(), ".xlsx")
+  ruta_completa <- file.path(ruta_guardado, tabla_datos_figura_2BC)
+  
+  wb <- createWorkbook()
+  
+  ## estudio diferencias heatmap 1
+  # datos usados
+  addWorksheet(wb, "codon_usage_data")
+  writeData(wb, "codon_usage_data", codon_usage_data)
+  
+  # no hay varianza muestra a muestra, pero tengo conteos absolutos para hacer tabla de contingencia y aplicar chi2
+  # proporción esperada global de cada orf_class
+  totales_clase <- codon_usage_data |> 
+    group_by(orf_class) |> 
+    summarise(total_orf = sum(n_total), .groups = "drop") |> 
+    mutate(p_esperada = total_orf / sum(total_orf))
+  
+  # chi2
+  resultados_chi2 <- codon_usage_data |> 
+    left_join(totales_clase, by = "orf_class") |> 
+    group_by(codon) |> 
+    summarise(
+      chi2_stat = chisq.test(x = n_total, p = p_esperada)$statistic,
+      p_value   = chisq.test(x = n_total, p = p_esperada)$p.value,
+      .groups   = "drop"
+    ) |> 
+    mutate(
+      # fdr porque con 61 codones bonferroni castiga mucho (pvalor < 0.05/61)
+      fdr = p.adjust(p_value, method = "BH"),
+    )
+  
+  addWorksheet(wb, "resultados_chi2")
+  writeData(wb, "resultados_chi2", resultados_chi2)
+  
+  # prueba de comparación de proporciones por pares para saber entre cuáles: posthoc
+  # ver dentro de cada orfclass que codones son significativamente diferente
+  comparaciones_pares <- codon_usage_data |> 
+    # solo aquellos que ya dieron significativo en mi test global previo
+    filter(codon %in% resultados_chi2$codon) |> 
+    left_join(totales_clase, by = "orf_class") |> 
+    group_by(codon) |> 
+    reframe({
+      stats::pairwise.prop.test(
+        x = n_total, 
+        n = total_orf, 
+        p.adjust.method = "BH"
+      ) |> 
+        broom::tidy()
+    }) |> 
+    mutate(comparacion = paste(group1, "vs", group2)) |> 
+    select(codon, comparacion, group1, group2, p_adj_fdr = p.value)
+  
+  addWorksheet(wb, "comparaciones_pares")
+  writeData(wb, "comparaciones_pares", comparaciones_pares)
+  
+  ## estudio diferencias heatmap2: vs cds
+  # datos usados
+  addWorksheet(wb, "matriz_codones")
+  writeData(wb, "matriz_codones", matriz_codones)
+  
+  matriz_cds <- as_tibble(matriz_diff)
+  
+  addWorksheet(wb, "matriz_cds")
+  writeData(wb, "matriz_cds", matriz_cds)
+  
+  # como ya se ve cómo diferen respecto a cds, estudio si el perfil global de un orfclass específico difiere respecto de otro
+  # paso a df y devuelvo nombres codon
+  datos_long_matriz <- matriz_diff |> 
+    as.data.frame() |> 
+    rownames_to_column("codon") |>  
+    pivot_longer(
+      cols = -codon, 
+      names_to = "orf_class", 
+      values_to = "log2FC"
+    )
+  
+  # todas las combinaciones pareadas
+  resultados_vsCDS_pareados <- datos_long_matriz |> 
+    rstatix::pairwise_wilcox_test(
+      log2FC ~ orf_class, 
+      paired = TRUE, 
+      p.adjust.method = "none"
+    ) |> 
+    mutate(
+      comparacion = paste(group1, "vs", group2),
+      p_value_fdr = p.adjust(p, method = "BH")
+    ) |> 
+    select(comparacion, p_value = p, p_value_fdr)
+  
+  addWorksheet(wb, "resultados_vsCDS_pareados")
+  writeData(wb, "resultados_vsCDS_pareados", resultados_vsCDS_pareados)
+  
+  #saveWorkbook(wb, ruta_completa, overwrite = TRUE)
+}
+
+plots_codones(ieatlas, "ieatlas")
+plots_codones(ieatlas_two_evidences, "ieatlas_two_evidences")
+
+
+
+
+
+
