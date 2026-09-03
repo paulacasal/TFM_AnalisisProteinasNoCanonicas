@@ -1,0 +1,285 @@
+# Fig 17:  Análisis dominio transmembrana
+## DATA ANALYSIS de los datos obtenidos mediante el software deepTMHMM donde se insertan secuencias en formato FASTA para predecir dominios transmembrana
+
+# importación paleta colores y librería
+source("Yo/Figuras/library.R")
+source("Yo/Figuras/mipaleta_orfs.R")
+source("Yo/Figuras/Setup_figuras.R")
+
+# datos del script
+importacion_datos <- read_csv("Yo/DATA_Figuras/Deep_tmhmm_noCDS_20260820.csv") |> 
+  # elimino primera col que es un id que se me creó y luego sino el fulljoin se hará mal
+  select(-1) |> 
+  # viene con 22 NA, como son microproteínas, y es raro que tengan dominios
+  # les asigno 0
+  mutate(num_tmrs = replace_na(num_tmrs, 0))
+importacion_datos2 <- read_csv("Yo/DATA_Figuras/Deep_tmhmm_CDS_20260820.csv") |> 
+  select(-1) 
+
+# union datos
+col_noCDS <- importacion_datos|> 
+  mutate(orf_class = "no CDS") 
+
+resto_col <- importacion_datos |> 
+  full_join(importacion_datos2, by = c("gene_name", "cdna", "amino_acid_sequence",
+                                       "num_tmrs", "inicio", "fin", "tipo_region")) |> 
+  mutate(orf_class = if_else(!is.na(uniprot_id), "CDS", orf_class)) 
+
+datos_finales <- bind_rows(col_noCDS, resto_col)
+
+# en el plot 1 voy a representar el porcentaje de presencia dominio en graf barras
+data_plot1 <- datos_finales |>
+  mutate(id_unificado = coalesce(orf_id, uniprot_id)) |>
+  # quito betasheet del analisis porque el programa dice que solo las predice
+  # bien para procariotas, mis datos son de eucariotas
+  filter(tipo_region != "Beta sheet") |> 
+  # hay proteínas con más de una predicción, solo quiero una por id, porque quiero saber el número de proteínas con la presencia ptm
+  distinct(id_unificado, orf_class, num_tmrs) |>
+  group_by(orf_class) |>
+  summarise(
+    n = n(),
+    n_tmrs = sum(num_tmrs > 0, na.rm = TRUE),
+    per_orfclass = n_tmrs / n * 100,
+    .groups = "drop"
+  ) |> 
+  mutate(orf_class = factor(orf_class, levels = orden_orf)) 
+
+p1 <- ggplot(data_plot1, aes(x = orf_class, y = per_orfclass, fill = orf_class)) +
+  geom_col(position = position_dodge(width = 0.9)) +
+  geom_text(
+    aes(label = sprintf("%.2f%%", per_orfclass)),
+    position = position_dodge(width = 0.9),
+    vjust = -0.5, # encima 
+    size = 5) +
+  scale_fill_manual(values = colores_orfs) +
+  labs(title = "TMR Presence Ratio", 
+       y = "Percentage (%)",
+       x = "ORF subtype") +
+  theme_minimal(base_size = 15) + 
+  theme(legend.position = "none",
+        panel.border = element_rect(color = "black", fill = NA, linewidth = 1))
+
+print(p1)
+
+# ahora veo número de tmrs predichas por cada id y así obtengo info de la vida funcional de la proteína
+data_plot2 <- datos_finales |>
+  mutate(id_unificado = coalesce(orf_id, uniprot_id)) |>
+  distinct(id_unificado, orf_class, num_tmrs) |>
+  filter(num_tmrs > 0) |> 
+  group_by(orf_class, num_tmrs) |>
+  summarise(n = n(), .groups = "drop") |>
+  group_by(orf_class) |>
+  mutate(
+    porcentaje = 100 * n / sum(n)
+  ) |> 
+  mutate(orf_class = factor(orf_class, levels = orden_orf))
+
+p2 <- ggplot(data_plot2, aes(x = num_tmrs, y = porcentaje, colour = orf_class, group = orf_class)) +
+  geom_point(alpha = 0.6) +
+  geom_line(linewidth = 1.3) +
+  scale_colour_manual(values = colores_orfs) +
+  scale_x_log10() + 
+  labs(title = "Ratio of TMR by ID",
+       x = "Number of TMR by ORF ID",
+       y  = "Percentage (%)") +
+  theme_minimal(base_size = 15) + 
+  theme(legend.position = "none",
+        panel.border = element_rect(color = "black", fill = NA, linewidth = 1))
+
+print(p2)
+
+pfinal <- (p1 | p2) +
+  # añado título
+  plot_annotation(
+    title = "Transmembrane Domains Analysis",
+    theme = theme(
+      plot.title = element_text(size = 18, face = "bold", hjust = 0.05),
+    )
+  )
+print(pfinal)
+
+
+### ESTADÍSTICOS
+# Difrencias entre la presencia de dominio
+
+# Ruta 
+ruta_guardado <- "C:/Users/paula/UNAV/TFM/Yo/Figuras/estadisticos"
+
+estadisticos_domain_deeptmhmm <- paste0("estadisticos_domain_deeptmhmm_ieatlastwoevidences", "_", Sys.Date(), ".xlsx")
+ruta_completa <- file.path(ruta_guardado, estadisticos_domain_deeptmhmm)
+
+wb <- createWorkbook()
+
+# Estadística plot1
+# datos usados
+addWorksheet(wb, "data_plot1")
+writeData(wb, "data_plot1", data_plot1)
+
+# compruebo si la distribución de tmrs depende de la clase de ORF
+# como uoORF tiene menos de n=5, en vez de chi2, hago prueba exacta de fisher
+tabla_contingencia <- data.frame(
+  Tmr = data_plot1$n_tmrs,
+  No_Tmr = data_plot1$n - data_plot1$n_tmrs
+)
+
+# pongo los nombres 
+rownames(tabla_contingencia) <- data_plot1$orf_class
+
+# paso a matriz para aplicar test fisher
+matriz_contingencia <- as.matrix(tabla_contingencia)
+
+# sin embargo, no se puede para matrices superiores a 2x2, entonces tengo que usar la simulación montecarlo. uso muestra grande
+test_fisher_global <- fisher.test(
+  matriz_contingencia, 
+  simulate.p.value = TRUE, 
+  B = 100000)
+
+test_fisher_global <- tidy(test_fisher_global)
+
+addWorksheet(wb, "test_fisher_global")
+writeData(wb, "test_fisher_global", test_fisher_global)
+
+# ahora veo el pvalor de cada grupo
+test_posthoc_fisher <- pairwise_fisher_test(
+  matriz_contingencia, 
+  p.adjust.method = "fdr"
+)
+
+addWorksheet(wb, "test_posthoc_fisher")
+writeData(wb, "test_posthoc_fisher", test_posthoc_fisher)
+
+
+# Estadística plot2
+# datos usados
+addWorksheet(wb, "data_plot2")
+writeData(wb, "data_plot2", data_plot2)
+
+# ahora estoy mirando número tmrs, que son datos de  conteo, variable numérica
+datos_expandidos <- datos_finales |>
+  mutate(id_unificado = coalesce(orf_id, uniprot_id)) |>
+  filter(num_tmrs > 0) |>
+  count(orf_class, id_unificado, name = "num_tmrs")
+
+test_kruskal <- kruskal.test(num_tmrs ~ orf_class, data = datos_expandidos)
+test_kruskal <- tidy(test_kruskal)
+
+addWorksheet(wb, "test_kruskal")
+writeData(wb, "test_kruskal", test_kruskal)
+
+# ahora comparación por pares
+test_posthoc_wilcox <- pairwise.wilcox.test(
+  x = datos_expandidos$num_tmrs,
+  g = datos_expandidos$orf_class,
+  p.adjust.method = "fdr"
+)
+
+test_posthoc_wilcox <-  tidy(test_posthoc_wilcox) 
+
+addWorksheet(wb, "test_posthoc_wilcox")
+writeData(wb, "test_posthoc_wilcox", test_posthoc_wilcox)
+
+saveWorkbook(wb, ruta_completa, overwrite = TRUE)
+
+
+## Renderizo las tablas para que sean aptas para ANEXO
+borde_vertical <- fp_border(color = "black", width = 1)
+
+# datos usados
+ft_plot1 <- data_plot1 |>
+  select(orf_class, n, n_tmrs, per_orfclass) |>
+  # sino la cargo así queda enmascarada por otras funciones
+  dplyr::rename(
+    `Clase de ORF` = orf_class,
+    `Total Proteínas (N)` = n,
+    `Proteínas con TMR` = n_tmrs,
+    `Porcentaje (%)` = per_orfclass
+  ) |>
+  flextable() |>
+  set_caption(caption = "Resumen descriptivo de la presencia de TMRs por clase de ORF.") |>
+  colformat_double(j = "Porcentaje (%)", digits = 2) |>
+  colformat_int(j = c("Total Proteínas (N)", "Proteínas con TMR")) |>
+  theme_vanilla() |>
+  font(fontname = "Times New Roman", part = "all") |>
+  fontsize(size = 9, part = "all") |>
+  border_inner_v(border = borde_vertical) |>  
+  border_outer(border = borde_vertical) |>
+  autofit()
+
+# fisher
+ft_fisher <- test_posthoc_fisher |>
+  as_tibble() |>
+  select(group1, group2, n, p, p.adj, p.adj.signif) |>
+  dplyr::rename(
+    `Grupo 1` = group1,
+    `Grupo 2` = group2,
+    `Muestra (N)` = n,
+    `p-valor bruto` = p,
+    `p-valor aj. (FDR)` = p.adj,
+    `Significación` = p.adj.signif
+  ) |>
+  flextable() |>
+  set_caption(caption = "Comparaciones por pares de la presencia de dominio transmembrana (Test Exacto de Fisher con corrección FDR).") |>
+  colformat_double(j = c("p-valor bruto", "p-valor aj. (FDR)"), digits = 4) |>
+  theme_vanilla() |>
+  font(fontname = "Times New Roman", part = "all") |>
+  fontsize(size = 9, part = "all") |>
+  border_inner_v(border = borde_vertical) |> 
+  border_outer(border = borde_vertical) |>
+  autofit()
+
+ft_plot2 <- data_plot2 |>
+  select(orf_class, num_tmrs, n, porcentaje) |>
+  dplyr::rename(
+    `Clase de ORF` = orf_class,
+    `Nº TMRs / Prot.` = num_tmrs,
+    `Frecuencia (N)` = n,
+    `Porcentaje (%)` = porcentaje
+  ) |>
+  flextable() |>
+  set_caption(caption = "Distribución del número de TMRs predichas por proteína según clase de ORF.") |>
+  colformat_double(j = "Porcentaje (%)", digits = 2) |>
+  colformat_int(j = c("Nº TMRs / Prot.", "Frecuencia (N)")) |>
+  theme_vanilla() |>
+  font(fontname = "Times New Roman", part = "all") |>
+  fontsize(size = 9, part = "all") |>
+  border_inner_v(border = borde_vertical) |> 
+  border_outer(border = borde_vertical) |>
+  autofit()
+
+ft_wilcox <- test_posthoc_wilcox |>
+  dplyr::select(group1, group2, p.value) |>
+  dplyr::rename(
+    `Grupo 1` = group1,
+    `Grupo 2` = group2,
+    `Valor p (FDR)` = p.value,
+  ) |>
+  flextable() |>
+  set_caption(caption = "Análisis Post-Hoc (Test de Wilcoxon) comparando el número de dominios.") |>
+  colformat_double(j = c("Valor p (FDR)"), digits = 4) |>
+  theme_vanilla() |>
+  font(fontname = "Times New Roman", part = "all") |>
+  fontsize(size = 9, part = "all") |>
+  border_inner_v(border = borde_vertical) |>
+  border_outer(border = borde_vertical) |>
+  autofit()
+
+doc <- read_docx() |>
+  body_add_par("ANEXO: TABLAS DE RESULTADOS ESTADÍSTICOS TMR", style = "heading 1") |>
+  
+  # plot1
+  body_add_par("1. Presencia de dominio transmembrana", style = "heading 2") |>
+  body_add_flextable(ft_plot1) |>
+  body_add_par("", style = "Normal") |>
+  body_add_flextable(ft_fisher) |>
+  
+  # Salto de página
+  body_add_break() |>
+  
+  # plot2
+  body_add_par("2. Distribución Cuantitativa del Número de TMRs por Proteína", style = "heading 2") |>
+  body_add_flextable(ft_plot2) |>
+  body_add_par("", style = "Normal") |>
+  body_add_flextable(ft_wilcox)
+
+# Guardar el archivo final
+print(doc, target = "Anexos_TFM_TMR.docx")
