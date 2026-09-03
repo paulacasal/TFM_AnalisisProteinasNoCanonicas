@@ -1,0 +1,96 @@
+# Fig 19: DATA ANALYSIS de los datos obtenidos mediante el software deeploc que predice la localización subcelular a partir de secuencias FASTA
+# en este script se analliza el tipo de region topológica, es decir, cómo está
+# organizada respecto a la membrana
+
+# importación paleta colores y librería
+source("Yo/Figuras/library.R")
+source("Yo/Figuras/mipaleta_orfs.R")
+source("Yo/Figuras/Setup_figuras.R")
+
+# datos del script
+importacion_datos <- read_csv("Yo/DATA_Figuras/Deep_tmhmm_20260712_noCDS.csv") |> 
+  # elimino primera col que es un id que se me creó y luego sino el fulljoin se hará mal
+  select(-1) |> 
+  # viene con 22 NA, como son microproteínas, y es raro que tengan dominios
+  # les asigno 0
+  mutate(num_tmrs = replace_na(num_tmrs, 0))
+importacion_datos2 <- read_csv("Yo/DATA_Figuras/Deep_tmhmm_20260721_CDS.csv") |> 
+  select(-1) 
+
+col_noCDS <- importacion_datos|> 
+  mutate(orf_class = "no CDS") 
+
+resto_col <- importacion_datos |> 
+  full_join(importacion_datos2, by = c("gene_name", "cdna", "amino_acid_sequence",
+                                       "num_tmrs", "inicio", "fin", "tipo_region")) |> 
+  mutate(orf_class = if_else(!is.na(uniprot_id), "CDS", orf_class)) 
+
+datos_finales <- bind_rows(col_noCDS, resto_col)
+
+# localizaciones predecidas: "inside"     "outside"    "TMhelix"    "signal"     NA   "periplasm"  "Beta sheet"
+# sin embargo, los datos de beta sheet los voy a tratar aparte puesto que el programa indica que esta prediccion es especifica de procariotas porque encontraron
+# pocas en eucariotas con las que construir el modelo
+
+data_location <- datos_finales |>
+  filter(!is.na(tipo_region)) |> 
+  mutate(tipo_region = case_when(
+    tipo_region == "inside"     ~ "intracellular",
+    tipo_region == "outside"    ~ "extracellular",
+    tipo_region == "TMhelix"    ~ "transmembrane_alpha",
+    tipo_region == "Beta sheet" ~ "transmembrane_beta", 
+    tipo_region == "signal"     ~ "signal_peptide",
+    tipo_region == "periplasm"  ~ "periplasmic",
+    TRUE                       ~ as.character(tipo_region)
+  )) |> 
+  mutate(id_unificado = coalesce(orf_id, uniprot_id)) |>
+  distinct(id_unificado, orf_class, tipo_region) |>
+  group_by(orf_class, tipo_region) |> 
+  summarise(
+    n = n(),
+    .groups = "drop_last"
+  ) |> 
+  mutate(per_orfclass = (n / sum(n)) * 100) |> 
+  mutate(orf_class = factor(orf_class, levels = orden_orf))
+
+# plot procentaje de localizacion predecida por orfclass sobre el total del orfclass
+p1 <- ggplot(data_location, aes(x = orf_class, y = per_orfclass, fill = orf_class)) +
+  geom_col(position = position_dodge(width = 0.9)) +
+  geom_text(
+    aes(label = sprintf("%.2f%%", per_orfclass)),
+    position = position_dodge(width = 0.9),
+    vjust = -0.5, # encima 
+    size = 3) +
+  facet_wrap(~ tipo_region, scales = "free_y") +
+  scale_fill_manual(values = colores_orfs) +
+  labs(title = "Type of Location by Orfclass", 
+       y = "n",
+       x = "orf_class") +
+  theme(legend.position = "none")
+
+print(p1)
+
+
+# para facilitar visualización, añado una tabla donde se vea que n tiene cada tipo
+# la ordeno para que sea fácil leerla
+prep_tabla_location <- data_location |> 
+  arrange(tipo_region, orf_class)
+
+tabla_location <- ggtexttable(prep_tabla_location, 
+                             rows = NULL, 
+                             theme = ttheme(
+                               base_style = "minimal", 
+                               # Cabecera con fondo gris
+                               colnames.style = colnames_style(fill = "grey85", 
+                                                               color = "black", 
+                                                               face = "bold"),
+                               # alternando entre blanco y gris muy claro
+                               tbody.style = tbody_style(fill = c("white", "grey95"), 
+                                                         color = "black"),
+                               base_size = 4,                 
+                               padding = unit(c(1.0, 1.0), "mm")
+                             ))
+# lo junto con mi plot
+plot_final <- ggarrange(plot_location, tabla_location, 
+                        ncol = 2, nrow = 1, 
+                        widths = c(2.5, 1.5))
+print(plot_final)
