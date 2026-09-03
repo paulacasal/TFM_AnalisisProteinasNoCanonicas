@@ -1,0 +1,13 @@
+# Paleta de colores para los subitpos de ncaORFs y caORF usado en todos los códigos
+colores_orfs <- c(
+  "CDS" = "salmon", 
+  "no CDS" = "pink",
+  "uORF" = "khaki", 
+  "uoORF"= "mediumpurple3",
+  "intORF" = "palegreen",
+  "doORF" = "lightblue2", 
+  "dORF"= "orange",
+  "lncORF" = "darkseagreen",
+  "ncORF" = "turquoise2")
+
+mipaleta <- names(colores_orfs)
