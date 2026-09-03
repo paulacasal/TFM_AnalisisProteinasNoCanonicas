@@ -1,0 +1,410 @@
+# trna adaptation index (tAI): es una métrica para medir la eficiencia de traducción considerando los valores ponderados (valores Sij) 
+# para las eficiencias de interacción de balanceo codón-tRNA 
+
+# Este script contiene una idea original para aproximarse a un tai cuando se carece de la información de anticodon. 
+# Los datos con los que se cuentan son la secuencia genómica de ncaORFs y de caORFs, el objetivo es estudiar si la
+# eficiencia de traducción en un marco de lectura no canónico en cáncer se parece más a células humanas sanas o virus.
+
+# Mi conjunto de datos carece de anticodones, por ello se han extraído de bases de datos públicas:
+# he descargado los trnas de humano de Gtrnadb
+# he descargado los trna de virus de trnadb. (reliable)
+
+# Metodología: Cojo los tRNAs de las células sanas descargados y calculo la abundancia de cada anticodón 
+# Uso las reglas de tambaleo (wobble) para pasar de anticodones a codones. Esto 
+# me da un valor de "disponibilidad de tRNA" para cada uno de los 60 codones.
+# Finalmente normalizo para cada aa, busco qué codón tuvo el valor más alto. A ese 
+# le pongo un 1. A los demás codones de ese mismo aminoácido, los divido por ese máximo 
+# (me quedarán valores entre 0 y 1). Todo esto me generará una tabla de referencia sana
+
+# SET UP TRNA INDEX
+# importación paleta colores y librería
+source("Yo/Figuras/library.R")
+source("Yo/Figuras/mipaleta_orfs.R")
+source("Yo/Figuras/Setup_figuras.R")
+
+df_trnas <- function(datos, nombre_db) {
+  
+  datos_finales <- datos |> 
+    full_join(uniprot_cds, by = c("gene_name", "cdna", "amino_acid_sequence")) |> 
+    mutate(orf_class = if_else(!is.na(uniprot_id), "CDS", orf_class)) 
+  
+  datos_excluir <- c("CDS", "multiclass", "wrapping", "miscellaneous", "unknown ORF", 
+                     "ncRNA", "protein_coding_CDS_not_defined")
+  
+  col_noCDS <- datos_finales |> 
+    filter(!orf_class %in% datos_excluir,
+           !is.na(orf_class)) |>  
+    mutate(orf_class = "no CDS")
+  
+  resto_col <- datos_finales |> 
+    filter(orf_class %in% niveles_permitidos) |> 
+    mutate(orf_class = case_when(
+      orf_class == "lncRNA-ORF" ~ "lncORF",
+      orf_class == "ncRNA_from_protein_coding_gene" ~ "ncORF",
+      TRUE ~ as.character(orf_class))) 
+  
+  datos_plot <- bind_rows(col_noCDS, resto_col)
+  
+  # preparo la matriz de mis genes: cada fila un gen y cada columna uno de los 
+  # 60 codones (en tAI no se usan los stop codons ni met). Frec de cuanto aparece cada uno
+  # lista codones, pero primero solo con los que tienen correspondencia perfecta a la lista de 
+  # trna humanos
+  
+  codon_aa_orf <- datos_plot |> 
+    mutate(codones_seq = if_else(orf_class == "CDS", cdna, orf_seq)) |> 
+    mutate(codones = str_extract_all(codones_seq, ".{3}")) |> 
+    unnest(codones) |> 
+    # filtrado de seguridad
+    filter(nchar(codones) == 3 & !is.na(codones)) |> 
+    # saco también los aa de cada gen para así hacer la comparación de preferencia de uso para el mismo gen
+    # para cada aa veo el codon que tiene el anticodon más abundante
+    group_by(gene_name, orf_class) |>
+    # strsplit(amino_acid_sequence, split = "") |> 
+    mutate(aa_pos = row_number()) |>                          # posición del codón
+    mutate(aa = str_sub(amino_acid_sequence, aa_pos, aa_pos)) |> 
+    ungroup() |>
+    filter(!is.na(aa)) |>
+    select(gene_name, orf_class, codones, aa)
+  
+  # escribo los 61 codones que usan trna, los stop codons no usan
+  codones_61 <- c("TTT","TTC","TTA","TTG","TCT","TCC","TCA","TCG","TAT","TAC",
+                  "TGT","TGC","TGG","CTT","CTC","CTA","CTG","CCT","CCC","CCA",
+                  "CCG","CAT","CAC","CAA","CAG","CGT","CGC","CGA","CGG","ATT",
+                  "ATC","ATA","ACT","ACC","ACA","ACG","AAT","AAC","AAA","AAG",
+                  "AGT","AGC","AGA","AGG","GTT","GTC","GTA","GTG","GCT","GCC",
+                  "GCA","GCG","GAT","GAC","GAA","GAG","GGT","GGC","GGA","GGG",
+                  "ATG")
+  
+  ## datos trnas
+  # importo los datos de trna humano
+  datos_humano <- readRNAStringSet("Yo/DATA/hg38_mature_tRNAs.fa")
+  
+  # abundancia de copias de trna por codon
+  # hay 48 anticodones sin wobble en el genoma nuclear humano de células sanas
+  trna_hum <- data.frame(
+    header = names(datos_humano),
+    sequence = as.character(datos_humano)) |> 
+    mutate(
+      # Extraer el anticodón usando expresión para coger lo que está entre el segundo y el tercer guión
+      anticodones_hum = str_extract(header, "(?<=\\()[A-Z]{3}(?=\\))"),
+      # los paso a codones. Trato los anticodones como dna porque todos van con T
+      codon_hum = as.character(reverseComplement(DNAStringSet(anticodones_hum)))) |> 
+    # cuento cuantas veces está cada codon para así tener la abundancia de que codones
+    # se traducen a anticodones y poder calcular cual es el más eficiente = G_j
+    count(codon_hum, name = "G_j", anticodones_hum) |>
+    # Traducimos el codón para saber con que aa va
+    mutate(aa_hum = as.character(translate(DNAStringSet(codon_hum)))) |>
+    select(codon_hum, aa_hum, anticodones_hum, G_j)
+  
+  # quiero penalizar los anticodones que no apareen, simulando una aproximación al wobble real: lo más cercano es penalizar con el valor minimo
+  
+  # penalizaciones definidaS: para la penalización he definido un gradiente desde 0.2, valor elegido en base a literatura
+  # descrita y realidad de los datos: menos que a un match de wobble, pero más que apareamiento imposible. 
+  # el gradiente va desde 0.2 a 10 veces menos. 0.2 => watsoncrick y bajando hasta 0.02 en no permitidos
+  
+  # paso la lista codones a tabla
+  codones_base <- tibble(codon_gen = codones_61)
+  
+  trnas_codones_hum <- trna_hum |> 
+    select(codon_trna = codon_hum, aa_trna = aa_hum, G_j = G_j) |> 
+    distinct()
+  
+  tabla_wobble_hum <- codones_base |> 
+    # la traducción exacta del codon
+    mutate(aa_gen = as.character(translate(DNAStringSet(codon_gen)))) |> 
+    cross_join(trnas_codones_hum) |> 
+    # separo bases codon para aplicar wobble en la tercera base
+    mutate(
+      mismo_aa = (aa_gen == aa_trna),
+      g1 = substr(codon_gen, 1, 1), t1 = substr(codon_trna, 1, 1),
+      g2 = substr(codon_gen, 2, 2), t2 = substr(codon_trna, 2, 2),
+      g3 = substr(codon_gen, 3, 3), t3 = substr(codon_trna, 3, 3),
+      # el wobble se da en la tercera pos del codon y 1 del anticodon, sin embargo, arriba pase el anticodon a codon para que fuera más sencillo de simular
+      # entonces junto las dos primeras bases
+      match_1_2 = (g1 == t1) & (g2 == t2),
+      # asigno pesos en base a literatura descrita (mario dos reis, principalmente)
+      peso = case_when(
+        !mismo_aa | !match_1_2 ~ 0.00,
+        codon_gen == codon_trna ~ 0.50,                         # Watson-Crick perfecto
+        (g3 == "A" & t3 == "C") | (g3 == "C" & t3 == "A") ~ 0.40, # Wobble alto
+        g3 == "G" & t3 == "T" ~ 0.30, # Wobble intermedio
+        g3 == "T" & t3 == "G" ~ 0.20, # Wobble bajo
+        TRUE ~ 0.02 
+      ),
+      # contribución específica de un tRNA a un codón
+      eficiencia_parcial = peso * G_j
+    ) |> 
+    group_by(codon_gen, aa_gen) |> 
+    # el peso wi es la suma de todas las contribuciones parciales para el mismo codon
+    summarise(w_absoluto = sum(eficiencia_parcial), .groups = "drop") |> 
+    group_by(aa_gen)|>
+    # normalizo valores!
+    mutate(w_final = w_absoluto/ max(w_absoluto)) |> 
+    ungroup()
+  
+  # tai humano: no hago leftjoin por aa porque en la tabal og se han quedado codones sin aa asignado entonces los descaría
+  trnaai_hum <- codon_aa_orf |>
+    inner_join(tabla_wobble_hum |> 
+                 select(codon_gen, w_final), by = c("codones" = "codon_gen")) |>
+    group_by(gene_name, orf_class) |>
+    summarise(
+      n_codones = n(),
+      # media geométrica
+      tai_hum = exp(mean(log(w_final))), 
+      .groups = "drop") |> 
+    # si la media más pequeña era 40aa por miP, filtramos y así es más robusto
+    filter(n_codones >= 38) # porque no tiene stop ni met
+  
+  
+  ## ahora la misma lógica con los trnas de virus
+  datos_virus <- read_tsv("Yo/DATA/trna_sequence_virus_reliable.tab/trna_sequence_virus_1.tab")
+  # por si alguna venía en minúscula
+  anticodones_virus <- toupper(as.character(datos_virus[[8]])) 
+  
+  # tengo que meter vector anticodon en df para poder usar mutate
+  trna_virus <- data.frame(anticodon = anticodones_virus) |> 
+    # filtro seguridad
+    filter(nchar(anticodon) == 3) |>
+    mutate(codon_vir = as.character(reverseComplement(DNAStringSet(anticodon)))) |>
+    count(codon_vir, name = "G_j") |>
+    mutate(aa_vir = as.character(translate(DNAStringSet(codon_vir)))) |> 
+    select(codon_vir, aa_vir, G_j)
+  
+  # tiene todavía más sentido esta estrategia en virus, ya que, su abundancia 
+  # apenas cuenta, a veces son una copia únicamente, se espera entonces una menor eficiencia
+  trnas_codones_vir <- trna_virus |> 
+    select(codon_trna = codon_vir, aa_trna = aa_vir, G_j = G_j) |> 
+    distinct()
+  
+  tabla_wobble_virus <- codones_base |> 
+    mutate(aa_gen = as.character(translate(DNAStringSet(codon_gen)))) |> 
+    cross_join(trnas_codones_vir) |> 
+    mutate(
+      mismo_aa = (aa_gen == aa_trna),
+      g1 = substr(codon_gen, 1, 1), t1 = substr(codon_trna, 1, 1),
+      g2 = substr(codon_gen, 2, 2), t2 = substr(codon_trna, 2, 2),
+      g3 = substr(codon_gen, 3, 3), t3 = substr(codon_trna, 3, 3),
+      match_1_2 = (g1 == t1) & (g2 == t2),
+      peso = case_when(
+        !mismo_aa | !match_1_2 ~ 0.00,
+        codon_gen == codon_trna ~ 0.50,                         # Watson-Crick perfecto
+        (g3 == "A" & t3 == "C") | (g3 == "C" & t3 == "A") ~ 0.40, # Wobble alto
+        g3 == "G" & t3 == "T" ~ 0.30, # Wobble intermedio
+        g3 == "T" & t3 == "G" ~ 0.20, # Wobble bajo
+        TRUE ~ 0.02 
+      ), # contribución específica de un tRNA a un codón
+      eficiencia_parcial = peso * G_j
+    ) |> 
+    group_by(codon_gen, aa_gen) |> 
+    summarise(w_absoluto = sum(eficiencia_parcial), .groups = "drop") |> 
+    group_by(aa_gen)|>
+    mutate(w_final = w_absoluto/ max(w_absoluto)) |> 
+    ungroup()
+  
+  trnaai_vir <- codon_aa_orf |>
+    inner_join(tabla_wobble_virus, by = c("codones" = "codon_gen")) |>
+    group_by(gene_name, orf_class) |>
+    summarise(
+      n_codones = n(),
+      tai_vir = exp(mean(log(w_final))),
+      .groups = "drop" ) |> 
+    filter(n_codones >= 38)
+  
+  # jutno tai humanos y virus
+  datos_plot_tai <- trnaai_hum |> 
+    full_join(trnaai_vir, by = c("gene_name", "orf_class")) |> 
+    pivot_longer(
+      cols = c(tai_hum, tai_vir),
+      names_to = "origen_trna",
+      values_to = "valor_tai") |> 
+    mutate(origen_trna = if_else(origen_trna == "tai_hum", "Human", "Virus")) |> 
+    mutate(orf_class = factor(orf_class, levels = orden_orf)) 
+
+  # ploteo los valores en un violin plot para ver la distribución, así es fácil visualizar en torno a que eficiencia están los genes
+  # y con las colas los máximos y mínimos
+  p2 <- ggplot(datos_plot_tai, aes(x = orf_class, y = valor_tai, fill = orf_class)) +
+    geom_violin(alpha = 0.7, scale = "width") +
+    geom_boxplot(width = 0.15, outlier.shape = NA, alpha = 0.8, show.legend = FALSE) +
+    facet_wrap(~ origen_trna, scales = "free_x") +
+    scale_fill_manual(values = colores_orfs) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.1)) +
+    labs(
+      title = "tRNA Adaptation Index with wobble",
+      subtitle = nombre_db,
+      x = "ORF Class",
+      y = "translation efficency"
+    ) +
+    theme_minimal(base_size = 15) +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      axis.text.x = element_blank(),
+      legend.position = "right"
+    )
+  
+  print(p2)
+  
+  # se observa una eficiencia de traducción de cds consistente entorno a 0.7,
+  # mientras que la de no cds varía mucho y baja la mediana a 0.4, y hay colas
+  # que se extienden hasta casi el 0, es decir, no están nada optimizados.
+  # el tai viríco es menor en todos los casos y en cds es mayor puesto que al final
+  # la maquinaria del virus se dapta a la más óptima del huésped que es la de cds
+  # también que los virus dependen mucho del wobble y no lo he aplicado
+  
+  
+  # ESTADÍSTICOS
+  # Nivel global: human vs virus, con todos los orfs juntos
+  # los datos biológicos no suelen seguir distribución normal y son muestras emparejadas
+  # aplico wilcox global para ver si existen diferencias y luego comparo por pares
+  wilcox_global <- datos_plot_tai |> 
+    # especifico rstatix porque sino no lo coge
+    rstatix::wilcox_test(valor_tai ~ origen_trna, paired = TRUE) |> 
+    add_significance()
+  
+  # print(wilcox_global) # hay diferencias significativas
+  
+  # Nivel por clase: human vs virus según orfclass
+  wilcox_clase <- datos_plot_tai |> 
+    group_by(orf_class) |> 
+    rstatix::wilcox_test(valor_tai ~ origen_trna, paired = TRUE) |> 
+    adjust_pvalue(method = "bonferroni") |> 
+    add_significance()
+  
+  #print(wilcox_clase)
+  
+  # miré los propios subtipos para ver si hay diferencias entre ellos
+  # como las hubo miro comparacion por pares
+  bonferroni_subtypes <- datos_plot_tai |> 
+    group_by(origen_trna) |> 
+    pairwise_wilcox_test(
+      valor_tai ~ orf_class, 
+      p.adjust.method = "bonferroni") 
+  
+  # ver cual es el efecto real porque tengo un tamaño diferente de los datos: cds mucho más grandes
+  bonferroni_subtypes_efecto <- datos_plot_tai |> 
+    group_by(origen_trna) |> 
+    # uso corrección por bonferroni en vez de fdr porque aún sabiendo que penaliza de más los datos, porque como es un abordaje
+    # novedoso quiero que las diferencias observadas sean lo más reales posibles
+    wilcox_effsize(valor_tai ~ orf_class, p.adjust.method = "bonferroni")
+  
+  # Ruta 
+  ruta_guardado <- "C:/Users/paula/UNAV/TFM/Yo/Figuras/estadisticos"
+  
+  estadisticos_trnai_sinwobble <- paste0("Resultados_tAI_", nombre_db, "_", Sys.Date(), ".xlsx")
+  ruta_completa <- file.path(ruta_guardado, estadisticos_trnai_sinwobble)
+  
+  wb <- createWorkbook()
+  
+  addWorksheet(wb, "Wilcox_Global")
+  writeData(wb, "Wilcox_Global", wilcox_global)
+  
+  addWorksheet(wb, "Wilcox_Clase")
+  writeData(wb, "Wilcox_Clase", wilcox_clase)
+  
+  addWorksheet(wb, "Bonferroni_subtypes")
+  writeData(wb, "Bonferroni_subtypes", bonferroni_subtypes)
+  
+  addWorksheet(wb, "Bonferroni_subtypes_efecto")
+  writeData(wb, "Bonferroni_subtypes_efecto", bonferroni_subtypes_efecto) 
+  
+  # incluyo además el valor de la mediana
+  tabla_medianas <- datos_plot_tai |>
+    group_by(orf_class, origen_trna) |>
+    summarise(
+      mediana_tai = median(valor_tai, na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    pivot_wider(
+      names_from = origen_trna,
+      values_from = mediana_tai
+    )
+  
+  addWorksheet(wb, "tabla_medianas")
+  writeData(wb, "tabla_medianas", tabla_medianas)
+  
+  addWorksheet(wb, "tabla_wobble_hum")
+  writeData(wb, "tabla_wobble_hum", tabla_wobble_hum)
+  
+  addWorksheet(wb, "tabla_wobble_virus")
+  writeData(wb, "tabla_wobble_virus", tabla_wobble_virus)
+  
+  # Guardar
+  saveWorkbook(wb, ruta_completa, overwrite = TRUE)
+  
+  
+  ## ANEXO
+  borde_vertical <- fp_border(color = "black", width = 0.5)
+  
+  ft_wilcox_clase <- wilcox_clase |>
+    select(any_of(c("orf_class", "group1", "group2", "n1", "n2", "statistic", "p", "p.adj", "p.adj.signif"))) |>
+    dplyr::rename(
+      `Clase de ORF` = orf_class,
+      `Grupo 1` = group1,
+      `Grupo 2` = group2,
+      `Estadístico (V)` = statistic,
+      `Valor p` = p,
+      `Valor p (Bonf.)` = p.adj,
+      `Significancia` = p.adj.signif
+    ) |>
+    flextable() |>
+    set_caption(caption = "Prueba de rangos con signo de Wilcoxon para muestras emparejadas (tAI humano vs. viral) por clase de ORF.") |>
+    colformat_double(j = c("Valor p", "Valor p (Bonf.)"), digits = 4) |>
+    theme_vanilla() |>
+    font(fontname = "Times New Roman", part = "all") |>
+    fontsize(size = 9, part = "all") |>
+    border_inner_v(border = borde_vertical) |>
+    border_outer(border = borde_vertical) |>
+    autofit()
+  
+  ft_efecto <- bonferroni_subtypes_efecto |>
+    select(any_of(c("origen_trna", "group1", "group2", "effsize", "magnitude"))) |>
+    dplyr::rename(
+      `Origen ARNt` = origen_trna,
+      `Subtipo 1` = group1,
+      `Subtipo 2` = group2,
+      `Tamaño del efecto (r)` = effsize,
+      `Magnitud` = magnitude
+    ) |>
+    flextable() |>
+    set_caption(caption = "Magnitud del tamaño del efecto (wilcox_effsize) en las comparaciones por pares entre subtipos de ORF.") |>
+    colformat_double(j = "Tamaño del efecto (r)", digits = 4) |>
+    theme_vanilla() |>
+    font(fontname = "Times New Roman", part = "all") |>
+    fontsize(size = 9, part = "all") |>
+    border_inner_v(border = borde_vertical) |>
+    border_outer(border = borde_vertical) |>
+    autofit()
+  
+  ft_medianas <- tabla_medianas |>
+    dplyr::rename(`Clase de ORF` = orf_class) |>
+    flextable() |>
+    set_caption(caption = "Medianas del índice tAI por clase de ORF según el origen del repertorio de ARNt.") |>
+    colformat_double(digits = 4) |>
+    theme_vanilla() |>
+    font(fontname = "Times New Roman", part = "all") |>
+    fontsize(size = 9, part = "all") |>
+    border_inner_v(border = borde_vertical) |>
+    border_outer(border = borde_vertical) |>
+    autofit()
+  
+  doc <- read_docx() |>
+    body_add_par("Anexo: Análisis Estadístico del tRNA Adaptation Index (tAI)", style = "heading 1") |>
+    body_add_par("Evaluación cuantitativa de la eficiencia de traducción teórica (tAI) entre los distintos subtipos de ORFs no canónicos y las secuencias codificantes (CDS). Se presentan los contrastes no paramétricos de Wilcoxon para muestras emparejadas (repertorio humano vs. viral), la corrección por comparaciones múltiples de Bonferroni, la estimación del tamaño del efecto y las medianas descriptivas por categoría.", style = "Normal") |>
+    body_add_par("", style = "Normal") |>
+    
+    body_add_par("Resultados del Test de Wilcoxon por Clase de ORF", style = "heading 2") |>
+    body_add_flextable(ft_wilcox_clase) |>
+    body_add_par("", style = "Normal") |>
+    
+    body_add_par("Tamaño del Efecto en las Comparaciones por Pares", style = "heading 2") |>
+    body_add_flextable(ft_efecto) |>
+    body_add_par("", style = "Normal") |>
+    
+    body_add_par("Medianas de tAI por Categoria y Repertorio", style = "heading 2") |>
+    body_add_flextable(ft_medianas)
+  
+  print(doc, target = file.path(ruta_guardado, paste0("Anexo_Estadistica_tAI_", Sys.Date(), ".docx")))
+  
+}
+
+grafico_ieatlas <- df_trnas(ieatlas, "ieatlas")
+grafico_two_evidences <- df_trnas(ieatlas_two_evidences, "ieatlas_two_evidences")
