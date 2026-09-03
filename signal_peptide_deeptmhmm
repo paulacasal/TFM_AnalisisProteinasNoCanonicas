@@ -1,0 +1,215 @@
+## Fig 18: DATA ANALYSIS de los datos obtenidos mediante el software deepTMHMM
+# en este script se analizan los signal peptides con el fin de saber cuáles proteínas entran a la vía secretora
+
+# importación paleta colores y librería
+source("Yo/Figuras/library.R")
+source("Yo/Figuras/mipaleta_orfs.R")
+source("Yo/Figuras/Setup_figuras.R")
+
+# datos del script
+importacion_datos <- read_csv("Yo/DATA_Figuras/Deep_tmhmm_20260712_noCDS.csv") |> 
+  # elimino primera col que es un id que se me creó y luego sino el fulljoin se hará mal
+  select(-1) |> 
+  # viene con 22 NA, como son microproteínas, y es raro que tengan dominios
+  # les asigno 0
+  mutate(num_tmrs = replace_na(num_tmrs, 0))
+importacion_datos2 <- read_csv("Yo/DATA_Figuras/Deep_tmhmm_20260721_CDS.csv") |> 
+  select(-1) 
+
+col_noCDS <- importacion_datos|> 
+  mutate(orf_class = "no CDS") 
+
+resto_col <- importacion_datos |> 
+  full_join(importacion_datos2, by = c("gene_name", "cdna", "amino_acid_sequence",
+                                       "num_tmrs", "inicio", "fin", "tipo_region")) |> 
+  mutate(orf_class = if_else(!is.na(uniprot_id), "CDS", orf_class)) 
+
+datos_finales <- bind_rows(col_noCDS, resto_col)
+
+# quiero ver si cuando hay sp también tm para ver si existe función real biológica
+analisis_topologia <- datos_finales |>
+  mutate(id_unificado = coalesce(orf_id, uniprot_id)) |>
+  group_by(id_unificado, orf_class) |>
+  summarise(
+    tiene_sp = any(tipo_region == "signal", na.rm = TRUE),
+    tiene_tm = any(tipo_region == "TMhelix", na.rm = TRUE), 
+    .groups = "drop"
+  ) |>
+  mutate(
+    perfil_topologico = case_when(
+      tiene_sp & !tiene_tm ~ "SP",
+      tiene_sp & tiene_tm  ~ "SP + TM",
+      !tiene_sp & tiene_tm ~ "TM",
+      TRUE                 ~ "None"
+    ),
+    #para ordenar
+    perfil_topologico = factor(perfil_topologico, 
+                               levels = c("None", 
+                                          "SP", 
+                                          "TM", 
+                                          "SP + TM"))
+  ) |> 
+  ungroup() |> 
+  mutate(orf_class = factor(orf_class, levels = orden_orf)) 
+
+datos_plot1 <- analisis_topologia |>
+  count(orf_class, perfil_topologico, name = "n") |>
+  # el total de cada clase
+  group_by(orf_class) |>
+  mutate(
+    total_orf = sum(n),
+    porcentaje = (n / total_orf) * 100
+  ) |>
+  ungroup() 
+
+p1 <- ggplot(datos_plot1, aes(x = perfil_topologico, y = porcentaje, fill = orf_class)) +
+  geom_col(linewidth = 0.3, show.legend = FALSE) +
+  geom_text(
+    aes(label = sprintf("%d", n)),
+    vjust = -0.2,
+    size = 5,
+  ) +
+  facet_wrap(~ orf_class, nrow = 3) +
+  scale_fill_manual(values = colores_orfs) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.14))) +
+  labs(title = "Distribution of Topological Profiles by ORF Subtype", 
+       y = "Percentage (%)",
+       x = "ORF subtype") +
+  theme_minimal(base_size = 18) + 
+  theme(legend.position = "none",
+        panel.border = element_rect(color = "black", fill = NA, linewidth = 1))
+
+print(p1)
+
+# ESTADÍSTICOS
+# diferencias entre la presencia de signalp
+
+# Ruta 
+ruta_guardado <- "C:/Users/paula/UNAV/TFM/Yo/Figuras/estadisticos"
+
+estadisticos_signalpeptide_deeptmhmm <- paste0("estadisticos_signalpeptide_deeptmhmm_ieatlastwoevidences", "_", Sys.Date(), ".xlsx")
+ruta_completa <- file.path(ruta_guardado, estadisticos_signalpeptide_deeptmhmm)
+
+wb <- createWorkbook()
+
+# datos usados
+addWorksheet(wb, "datos_plot1")
+writeData(wb, "datos_plot1", datos_plot1)
+
+# compruebo si la distribución de tmrs depende de la clase de ORF
+# como hay menos de n=5, en vez de chi2, hago prueba exacta de fisher
+tabla_topologia <- table(analisis_topologia$orf_class, 
+                         analisis_topologia$perfil_topologico)
+
+test_fisher_global <- fisher.test(tabla_topologia, simulate.p.value = TRUE, B = 10000)
+test_fisher_global <- tidy(test_fisher_global)
+
+addWorksheet(wb, "test_fisher_global")
+writeData(wb, "test_fisher_global", test_fisher_global)
+
+# ahora veo el pvalor de cada grupo
+totales_orf <- analisis_topologia |> count(orf_class, name = "total_clase")
+
+total_cds_val <- analisis_topologia |> filter(orf_class == "CDS") |> nrow()
+
+datos_cds_perfil <- analisis_topologia |> 
+  filter(orf_class == "CDS") |> 
+  count(perfil_topologico, name = "n_cds")
+
+# test de Fisher 2x2 para cada combinación de ORF y perfil topológico
+resultados_fisher <- analisis_topologia |>
+  filter(orf_class != "CDS") |>
+  count(orf_class, perfil_topologico, name = "n_orf") |>
+  left_join(totales_orf, by = "orf_class") |>
+  left_join(datos_cds_perfil, by = "perfil_topologico") |>
+  mutate(total_cds = total_cds_val) |>
+  rowwise() |>
+  mutate(
+    p_value = fisher.test(
+      matrix(c(
+        n_orf,             total_clase - n_orf,
+        n_cds,             total_cds - n_cds
+      ), nrow = 2, byrow = TRUE)
+    )$p.value
+  ) |>
+  ungroup() |>
+  # Corrección por múltiples comparaciones (FDR)
+  mutate(
+    p_adj = p.adjust(p_value, method = "fdr"),
+    significancia = case_when(
+      p_adj < 0.001 ~ "***",
+      p_adj < 0.01  ~ "**",
+      p_adj < 0.05  ~ "*",
+      TRUE          ~ "ns"
+    )
+  )
+
+addWorksheet(wb, "resultados_fisher")
+writeData(wb, "resultados_fisher", resultados_fisher)
+
+# Guardar
+saveWorkbook(wb, ruta_completa, overwrite = TRUE)
+
+
+## ANEXO
+borde_vertical <- fp_border(color = "black", width = 1)
+
+# datos usados
+ft_plot1 <- datos_plot1 |>
+  select(orf_class, total_orf, n, porcentaje) |>
+  # sino la cargo así queda enmascarada por otras funciones
+  dplyr::rename(
+    `Clase de ORF` = orf_class,
+    `Total Subtipo ORF (N)` = total_orf,
+    `Proteínas con Topología` = n,
+    `Porcentaje (%)` = porcentaje
+  ) |>
+  flextable() |>
+  set_caption(caption = "Resumen descriptivo de la presencia de distintas toopologías
+              por clase de ORF.") |>
+  colformat_double(j = "Porcentaje (%)", digits = 2) |>
+  colformat_int(j = c("Total Subtipo ORF (N)", "Proteínas con Topología")) |>
+  theme_vanilla() |>
+  font(fontname = "Times New Roman", part = "all") |>
+  fontsize(size = 9, part = "all") |>
+  border_inner_v(border = borde_vertical) |>  
+  border_outer(border = borde_vertical) |>
+  autofit()
+
+# fisher
+ft_fisher <- resultados_fisher |>
+  as_tibble() |>
+  # Seleccionamos las columnas relevantes del nuevo dataframe
+  select(orf_class, perfil_topologico, n_orf, n_cds, p_value, p_adj, significancia) |>
+  dplyr::rename(
+    `Clase ORF (vs CDS)` = orf_class,
+    `Perfil Topológico` = perfil_topologico,
+    `n (ORF)` = n_orf,
+    `n (CDS)` = n_cds,
+    `p-valor bruto` = p_value,
+    `p-valor aj. (FDR)` = p_adj,
+    `Significación` = significancia
+  ) |>
+  flextable() |>
+  # Actualizamos el título para reflejar que es contra CDS
+  set_caption(caption = "Comparación de la presencia de perfiles topológicos frente a CDS (Test Exacto de Fisher con corrección FDR).") |>
+  colformat_double(j = c("p-valor bruto", "p-valor aj. (FDR)"), digits = 4) |>
+  theme_vanilla() |>
+  font(fontname = "Times New Roman", part = "all") |>
+  fontsize(size = 9, part = "all") |>
+  border_inner_v(border = borde_vertical) |> 
+  border_outer(border = borde_vertical) |>
+  autofit()
+
+doc <- read_docx() |>
+  body_add_par("ANEXO: TABLAS DE RESULTADOS ESTADÍSTICOS TOPOLOGÍA", style = "heading 1") |>
+  
+  # plot1
+  body_add_par("Presencia de topología", style = "heading 2") |>
+  body_add_flextable(ft_plot1) |>
+  body_add_par("", style = "Normal") |>
+  body_add_flextable(ft_fisher)
+
+# Guardar el archivo final
+print(doc, target = "Anexos_TFM_topologia.docx")
+
