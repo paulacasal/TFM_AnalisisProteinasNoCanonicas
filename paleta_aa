@@ -1,0 +1,11 @@
+# Paleta de colores usada para el código figura 6
+colores_aa <- c(
+  "non-polar aliphatic" = "salmon",
+  "non-polar aromatic" = "darkseagreen",
+  "polar acidic" = "lightblue",
+  "polar basic" = "orchid4",
+  "polar neutral" = "lightpink",
+  "Stop" = "white"
+)
+
+paleta_aa <- names(colores_aa)
